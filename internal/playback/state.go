@@ -22,6 +22,13 @@ type HLSMaker interface {
 	MakeRemoteHLSPlaylist(trackURL, outDir, segName string, segDuration, bitRate int) error
 }
 
+const (
+	preloadRetryInitialDelay = time.Second
+	preloadRetryMaxDelay     = 15 * time.Second
+)
+
+var errNextTrackNotPrepared = errors.New("next netease track is not prepared")
+
 // State represents the current playback state of the application, including the currently playing track,
 // elapsed playback time, playlist management, and synchronization tools for safe concurrent access.
 type State struct {
@@ -47,6 +54,7 @@ type State struct {
 	followingPrepared *preparedTrack
 	preloadInFlight   bool
 	preloadGeneration int64
+	preloadRetryWait  func(time.Duration)
 
 	netEaseService *netease.Service
 	ffmpegCLI      HLSMaker
@@ -82,9 +90,10 @@ func NewStateWithHLSMaker(ns *netease.Service, hlsMaker HLSMaker, tmpDir string,
 		netEaseService: ns,
 		ffmpegCLI:      hlsMaker,
 
-		refreshCount:    0,
-		playlistDir:     tmpDir,
-		refreshInterval: 1,
+		refreshCount:     0,
+		playlistDir:      tmpDir,
+		refreshInterval:  1,
+		preloadRetryWait: time.Sleep,
 
 		log: log,
 	}
@@ -96,39 +105,53 @@ func (s *State) Run() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		s.mutex.Lock()
-		if !s.IsPlaying || s.CurrentTrack == nil || s.playlist == nil {
-			s.mutex.Unlock()
-			continue
-		}
+		s.refresh()
+	}
+}
 
-		s.CurrentTrackElapsed += s.refreshInterval
-		s.refreshCount++
+func (s *State) refresh() {
+	s.mutex.Lock()
+	if !s.IsPlaying || s.CurrentTrack == nil || s.playlist == nil {
+		s.mutex.Unlock()
+		return
+	}
 
-		if s.CurrentTrackElapsed >= s.CurrentTrack.Duration {
-			trackName, songID, err := s.loadNextTrackLocked()
-			if err != nil {
-				s.log.Error(err.Error())
-				s.pauseLocked()
+	s.CurrentTrackElapsed += s.refreshInterval
+	s.refreshCount++
+
+	if s.CurrentTrackElapsed >= s.CurrentTrack.Duration {
+		trackName, songID, err := s.loadNextTrackLocked()
+		if err != nil {
+			if errors.Is(err, errNextTrackNotPrepared) {
+				// Keep the live playlist available while the background preloader
+				// retries. Once a track is ready, the next refresh advances normally.
+				s.CurrentTrackElapsed = s.CurrentTrack.Duration
+				s.UpdatedAt = time.Now().Unix()
 				s.mutex.Unlock()
-				s.PauseNotify <- false
-				continue
+				s.ensurePreloaded()
+				return
 			}
 
-			s.PlaylistStr = s.playlist.Generate(s.CurrentTrackElapsed)
-			s.UpdatedAt = time.Now().Unix()
+			s.log.Error(err.Error())
+			s.pauseLocked()
 			s.mutex.Unlock()
-
-			s.recordPlayedSong(songID)
-			s.ensurePreloaded()
-			s.NewTrackNotify <- trackName
-			continue
+			s.PauseNotify <- false
+			return
 		}
 
 		s.PlaylistStr = s.playlist.Generate(s.CurrentTrackElapsed)
 		s.UpdatedAt = time.Now().Unix()
 		s.mutex.Unlock()
+
+		s.recordPlayedSong(songID)
+		s.ensurePreloaded()
+		s.NewTrackNotify <- trackName
+		return
 	}
+
+	s.PlaylistStr = s.playlist.Generate(s.CurrentTrackElapsed)
+	s.UpdatedAt = time.Now().Unix()
+	s.mutex.Unlock()
 }
 
 // Play starts playback by loading the current and next tracks into the HLS playlist.
@@ -216,7 +239,7 @@ func (s *State) Reload() error {
 // loadNextTrack advances the queue, resets elapsed time, and updates playlist with next segments.
 func (s *State) loadNextTrackLocked() (string, int64, error) {
 	if s.nextPrepared == nil || s.nextPrepared.track == nil || len(s.nextPrepared.segments) == 0 {
-		return "", 0, errors.New("next netease track is not prepared")
+		return "", 0, errNextTrackNotPrepared
 	}
 
 	s.CurrentTrackElapsed = 0
@@ -237,16 +260,8 @@ func (s *State) loadNextTrackLocked() (string, int64, error) {
 
 func (s *State) ensurePreloaded() {
 	s.mutex.Lock()
-	target := ""
-	if s.IsPlaying && !s.preloadInFlight {
-		switch {
-		case s.nextPrepared == nil:
-			target = "next"
-		case s.followingPrepared == nil:
-			target = "following"
-		}
-	}
-	if target == "" {
+	needsPreload := s.nextPrepared == nil || s.followingPrepared == nil
+	if !s.IsPlaying || s.playlist == nil || s.preloadInFlight || !needsPreload {
 		s.mutex.Unlock()
 		return
 	}
@@ -254,22 +269,46 @@ func (s *State) ensurePreloaded() {
 	generation := s.preloadGeneration
 	s.mutex.Unlock()
 
-	go func() {
-		recentlyPlayedSongIDs, excludeSongIDs := s.preloadSelectionContext()
+	go s.preload(generation)
+}
+
+func (s *State) preload(generation int64) {
+	for attempt := 1; ; attempt++ {
+		recentlyPlayedSongIDs, excludeSongIDs, ok := s.preloadSelectionContext(generation)
+		if !ok {
+			return
+		}
+
 		next, err := s.prepareRandomTrackAfter(recentlyPlayedSongIDs, excludeSongIDs...)
 
 		s.mutex.Lock()
-		needsMorePreload := false
-		s.preloadInFlight = false
-		if err != nil {
-			s.log.Error("Next track preload failed", slog.String("error", err.Error()))
-			s.mutex.Unlock()
-			return
-		}
+		// A previous Play/Reload worker must never clear or overwrite the
+		// in-flight state owned by the current generation.
 		if generation != s.preloadGeneration || !s.IsPlaying || s.playlist == nil {
 			s.mutex.Unlock()
 			return
 		}
+		if err != nil {
+			retryDelay := preloadRetryDelay(attempt)
+			retryWait := s.preloadRetryWait
+			s.mutex.Unlock()
+
+			s.log.Error(
+				"Next track preload failed; retrying",
+				slog.String("error", err.Error()),
+				slog.Int("attempt", attempt),
+				slog.Duration("retryIn", retryDelay),
+			)
+			if retryWait == nil {
+				time.Sleep(retryDelay)
+			} else {
+				retryWait(retryDelay)
+			}
+			continue
+		}
+
+		needsMorePreload := false
+		s.preloadInFlight = false
 		if s.nextPrepared == nil {
 			s.nextPrepared = next
 			s.playlist.ChangeNext(next.segments)
@@ -284,7 +323,17 @@ func (s *State) ensurePreloaded() {
 		if needsMorePreload {
 			s.ensurePreloaded()
 		}
-	}()
+		return
+	}
+}
+
+func preloadRetryDelay(attempt int) time.Duration {
+	delay := preloadRetryInitialDelay
+	for attempt > 1 && delay < preloadRetryMaxDelay {
+		delay *= 2
+		attempt--
+	}
+	return min(delay, preloadRetryMaxDelay)
 }
 
 func (s *State) prepareRandomTrackAfter(recentlyPlayedSongIDs []int64, excludeSongIDs ...int64) (*preparedTrack, error) {
@@ -312,9 +361,12 @@ func (s *State) prepareRandomTrackAfter(recentlyPlayedSongIDs []int64, excludeSo
 	}, nil
 }
 
-func (s *State) preloadSelectionContext() ([]int64, []int64) {
+func (s *State) preloadSelectionContext(generation int64) ([]int64, []int64, bool) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+	if generation != s.preloadGeneration || !s.IsPlaying || s.playlist == nil || !s.preloadInFlight {
+		return nil, nil, false
+	}
 
 	recentlyPlayedSongIDs := make([]int64, 0, 3)
 	excludeSongIDs := make([]int64, 0, 3)
@@ -330,7 +382,7 @@ func (s *State) preloadSelectionContext() ([]int64, []int64) {
 		recentlyPlayedSongIDs = append(recentlyPlayedSongIDs, s.followingPrepared.songID)
 		excludeSongIDs = append(excludeSongIDs, s.followingPrepared.songID)
 	}
-	return recentlyPlayedSongIDs, excludeSongIDs
+	return recentlyPlayedSongIDs, excludeSongIDs, true
 }
 
 func (s *State) recordPlayedSong(songID int64) {
