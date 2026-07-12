@@ -27,7 +27,7 @@ jobs:
             context: .
             file: Dockerfile.multiarch
             set-meta-labels: true
-            meta-images: ghcr.io/bingxin666/airstations
+            meta-images: ghcr.io/as214933/airstations
             meta-tags: |
                 type=ref,event=branch
                 type=ref,event=tag

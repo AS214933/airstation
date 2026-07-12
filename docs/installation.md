@@ -65,13 +65,13 @@ docker compose down
 
 ### Docker Compose
 
-You can get a pre-built image from [GitHub Container Registry](https://github.com/bingxin666/airstations/pkgs/container/airstations) and run it quickly with custom `docker-compose.yml` file as shown below:
+You can get a pre-built image from [GitHub Container Registry](https://github.com/orgs/AS214933/packages/container/package/airstations) and run it quickly with custom `docker-compose.yml` file as shown below:
 
 ```yml
 # docker-compose.yml
 services:
   airstation:
-    image: ghcr.io/bingxin666/airstations:latest
+    image: ghcr.io/as214933/airstations:latest
     ports:
       - "7331:7331"
     volumes:
