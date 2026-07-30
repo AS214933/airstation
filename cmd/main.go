@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path"
 	"syscall"
+	"time"
 
 	"github.com/cheatsnake/airstation/internal/config"
 	"github.com/cheatsnake/airstation/internal/http"
@@ -26,6 +28,10 @@ func main() {
 	signal.Notify(stopSignal, os.Interrupt, syscall.SIGTERM)
 
 	log := logger.New()
+	cleanupCtx, stopCleanup := context.WithCancel(context.Background())
+	defer stopCleanup()
+	go fs.RunFileCleanup(cleanupCtx, conf.TmpDir, conf.TmpRetention, time.Hour, log.WithGroup("cleanup"))
+
 	store, err := sqlite.New(path.Join(conf.DBDir, conf.DBFile), log.WithGroup("storage"))
 	if err != nil {
 		log.Error("Failed connect to database: " + err.Error())

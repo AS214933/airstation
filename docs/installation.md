@@ -56,6 +56,8 @@ The server keeps these values in SQLite and automatically builds the public HLS 
 When lyrics are available, the player prefers NetEase word-by-word lyrics, then synced scrolling lyrics, then plain lyric text.
 For overseas deployments, Airstation sends NetEase API requests with a mainland `X-Real-IP` header by default and rewrites NetEase audio CDN links from `m*.music.126.net` to `m*c.music.126.net`, matching the lightweight browser-extension unlock approach used by NetEaseMusicWorld++.
 Set `AIRSTATION_NETEASE_REAL_IP` to another mainland IP if needed, or set it to `off` to disable the header.
+Temporary HLS files in `AIRSTATION_TMP_DIR` are cleaned automatically after 24 hours by default.
+Set `AIRSTATION_TMP_RETENTION` to another Go duration such as `12h` or `48h` if you need a different retention window.
 
 To stop the container, just type:
 
