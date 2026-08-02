@@ -293,10 +293,10 @@ async def main():
         kwargs["session_string"] = sys.argv[4]
 
     client = Client(**kwargs)
-    await client.connect()
+    await client.start()
     me = await client.get_me()
     print(json.dumps({"id": me.id, "username": me.username or "", "first_name": me.first_name or "", "is_bot": me.is_bot}))
-    await client.disconnect()
+    await client.stop()
 
 asyncio.run(main())
 `
