@@ -239,16 +239,16 @@ func (s *Server) handleTestTelegramConfig(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleTelegramLoginCode(w http.ResponseWriter, r *http.Request) {
 	body, err := parseJSONBody[struct {
-		Phone   string `json:"phone"`
-		APIID   int    `json:"apiID"`
-		APIHash string `json:"apiHash"`
+		Phone   string             `json:"phone"`
+		APIID   telegram.IntString `json:"apiID"`
+		APIHash string             `json:"apiHash"`
 	}](r)
 	if err != nil {
 		jsonBadRequest(w, "Parsing request body failed: "+err.Error())
 		return
 	}
 
-	phoneCodeHash, err := s.telegramService.SendLoginCode(body.Phone, body.APIID, body.APIHash)
+	phoneCodeHash, err := s.telegramService.SendLoginCode(body.Phone, body.APIID.Int(), body.APIHash)
 	if err != nil {
 		jsonBadRequest(w, "Telegram login code request failed: "+err.Error())
 		return
@@ -259,19 +259,19 @@ func (s *Server) handleTelegramLoginCode(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleTelegramLoginSignIn(w http.ResponseWriter, r *http.Request) {
 	body, err := parseJSONBody[struct {
-		Phone         string `json:"phone"`
-		PhoneCodeHash string `json:"phoneCodeHash"`
-		Code          string `json:"code"`
-		Password      string `json:"password"`
-		APIID         int    `json:"apiID"`
-		APIHash       string `json:"apiHash"`
+		Phone         string             `json:"phone"`
+		PhoneCodeHash string             `json:"phoneCodeHash"`
+		Code          string             `json:"code"`
+		Password      string             `json:"password"`
+		APIID         telegram.IntString `json:"apiID"`
+		APIHash       string             `json:"apiHash"`
 	}](r)
 	if err != nil {
 		jsonBadRequest(w, "Parsing request body failed: "+err.Error())
 		return
 	}
 
-	err = s.telegramService.SignInUserbot(body.Phone, body.PhoneCodeHash, body.Code, body.Password, body.APIID, body.APIHash)
+	err = s.telegramService.SignInUserbot(body.Phone, body.PhoneCodeHash, body.Code, body.Password, body.APIID.Int(), body.APIHash)
 	if errors.Is(err, telegram.ErrPasswordNeeded) {
 		jsonResponse(w, struct {
 			NeedsPassword bool `json:"needsPassword"`
