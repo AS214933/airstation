@@ -20,6 +20,7 @@ The backend is organized simply. Station settings and NetEase playlist settings 
 - Possibility to temporarily stop the radio station
 - Listener counter
 - Player page customization
+- Optional real-time voice streaming to Telegram groups or channels via py-tgcalls
 
 ## Deep under the hood
 

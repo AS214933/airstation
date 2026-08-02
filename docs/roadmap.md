@@ -25,6 +25,7 @@ Here you can find a list of future updates.
 
 ## ✅ Done
 
+- [x] Real-time voice streaming to Telegram groups/channels via py-tgcalls
 - [x] Theming for player page (by [ptolemaea](https://github.com/cheatsnake/airstation/issues/21))
 - [x] Custom station info (name, description, logo, favicon, links)
 - [x] NetEase Cloud Music playlist source with random continuous HLS playback

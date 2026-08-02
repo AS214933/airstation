@@ -15,17 +15,19 @@ import (
 	"github.com/cheatsnake/airstation/internal/playback"
 	"github.com/cheatsnake/airstation/internal/station"
 	"github.com/cheatsnake/airstation/internal/storage"
+	"github.com/cheatsnake/airstation/internal/telegram"
 	"github.com/rs/cors"
 )
 
 type Server struct {
-	playbackState  *playback.State
-	eventsEmitter  *sse.Emitter
-	stationService *station.Service
-	netEaseService *netease.Service
-	config         *config.Config
-	logger         *slog.Logger
-	router         *http.ServeMux
+	playbackState   *playback.State
+	eventsEmitter   *sse.Emitter
+	stationService  *station.Service
+	netEaseService  *netease.Service
+	telegramService *telegram.Service
+	config          *config.Config
+	logger          *slog.Logger
+	router          *http.ServeMux
 }
 
 func NewServer(store storage.Storage, conf *config.Config, logger *slog.Logger) *Server {
@@ -34,15 +36,17 @@ func NewServer(store storage.Storage, conf *config.Config, logger *slog.Logger) 
 	netEaseClient := netease.NewHTTPClient(netease.WithRealIP(conf.NetEaseRealIP))
 	ns := netease.NewService(store, netEaseClient, logger.WithGroup("netease"))
 	state := playback.NewState(ns, ffmpegCLI, conf.TmpDir, logger.WithGroup("playback"))
+	ts := telegram.NewService(store, logger.WithGroup("telegram"))
 
 	return &Server{
-		playbackState:  state,
-		eventsEmitter:  sse.NewEmitter(),
-		stationService: ss,
-		netEaseService: ns,
-		config:         conf,
-		logger:         logger.WithGroup("http"),
-		router:         http.NewServeMux(),
+		playbackState:   state,
+		eventsEmitter:   sse.NewEmitter(),
+		stationService:  ss,
+		netEaseService:  ns,
+		telegramService: ts,
+		config:          conf,
+		logger:          logger.WithGroup("http"),
+		router:          http.NewServeMux(),
 	}
 }
 
@@ -65,12 +69,18 @@ func (s *Server) Run() {
 	s.router.Handle("PUT /api/v1/netease/config", s.jwtAuth(http.HandlerFunc(s.handleEditNetEaseConfig)))
 	s.router.Handle("POST /api/v1/netease/sync", s.jwtAuth(http.HandlerFunc(s.handleSyncNetEasePlaylist)))
 	s.router.Handle("PUT /api/v1/station/info", s.jwtAuth(http.HandlerFunc(s.handleEditStationInfo)))
+	s.router.Handle("GET /api/v1/telegram/config", s.jwtAuth(http.HandlerFunc(s.handleTelegramConfig)))
+	s.router.Handle("PUT /api/v1/telegram/config", s.jwtAuth(http.HandlerFunc(s.handleEditTelegramConfig)))
+	s.router.Handle("POST /api/v1/telegram/test", s.jwtAuth(http.HandlerFunc(s.handleTestTelegramConfig)))
 
 	s.router.Handle("GET /studio/", s.handleStaticDir("/studio/", s.config.StudioDir))
 	s.router.Handle("GET /", s.handleStaticDir("/", s.config.PlayerDir))
 
 	s.listenEvents()
 
+	if err := s.telegramService.Load(); err != nil {
+		s.logger.Warn("Telegram config loading failed: " + err.Error())
+	}
 	if err := s.netEaseService.Load(); err != nil {
 		s.logger.Warn("NetEase config loading failed: " + err.Error())
 	}
@@ -78,6 +88,10 @@ func (s *Server) Run() {
 	err := s.playbackState.Play()
 	if err != nil {
 		s.logger.Warn("Auto start playing failed: " + err.Error())
+	}
+
+	if err := s.telegramService.Start(); err != nil {
+		s.logger.Warn("Telegram streamer start failed: " + err.Error())
 	}
 
 	go s.playbackState.Run()
@@ -128,4 +142,9 @@ func (s *Server) listenEvents() {
 			}
 		}
 	}()
+}
+
+// Shutdown stops the Telegram streamer subprocess and any background goroutines.
+func (s *Server) Shutdown() error {
+	return s.telegramService.Stop()
 }

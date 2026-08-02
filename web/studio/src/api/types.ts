@@ -54,3 +54,21 @@ export interface StationInfo {
     links: string;
     theme: string;
 }
+
+export interface TelegramVoiceConfig {
+    enabled: boolean;
+    apiID: number;
+    apiHash: string;
+    sessionString: string;
+    streamURL: string;
+    chatIDs: string[];
+}
+
+export interface TelegramVoicePublicConfig {
+    enabled: boolean;
+    streamURL: string;
+    chatIDs: string[];
+    hasAPIID: boolean;
+    hasAPIHash: boolean;
+    hasSession: boolean;
+}

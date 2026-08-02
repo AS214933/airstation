@@ -9,6 +9,7 @@ import (
 	"github.com/cheatsnake/airstation/internal/netease"
 	"github.com/cheatsnake/airstation/internal/pkg/sse"
 	"github.com/cheatsnake/airstation/internal/station"
+	"github.com/cheatsnake/airstation/internal/telegram"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -198,4 +199,39 @@ func (s *Server) handleEditStationInfo(w http.ResponseWriter, r *http.Request) {
 	s.eventsEmitter.RegisterEvent(eventChangeTheme, " ")
 
 	jsonResponse(w, info)
+}
+
+func (s *Server) handleTelegramConfig(w http.ResponseWriter, _ *http.Request) {
+	jsonResponse(w, s.telegramService.PublicConfig())
+}
+
+func (s *Server) handleEditTelegramConfig(w http.ResponseWriter, r *http.Request) {
+	body, err := parseJSONBody[telegram.Config](r)
+	if err != nil {
+		jsonBadRequest(w, "Parsing request body failed: "+err.Error())
+		return
+	}
+
+	config, err := s.telegramService.EditConfig(*body)
+	if err != nil {
+		jsonBadRequest(w, "Telegram voice stream config update failed: "+err.Error())
+		return
+	}
+
+	jsonResponse(w, config)
+}
+
+func (s *Server) handleTestTelegramConfig(w http.ResponseWriter, r *http.Request) {
+	body, err := parseJSONBody[telegram.Config](r)
+	if err != nil {
+		jsonBadRequest(w, "Parsing request body failed: "+err.Error())
+		return
+	}
+
+	if err := s.telegramService.Test(*body); err != nil {
+		jsonBadRequest(w, "Telegram credentials test failed: "+err.Error())
+		return
+	}
+
+	jsonOK(w, "Telegram credentials are valid.")
 }

@@ -22,11 +22,21 @@ COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /app/bin/main ./cmd/main.go
 
-FROM alpine:latest
+FROM python:3.12-slim
 WORKDIR /app
-RUN apk add --no-cache ffmpeg
+
+# Install FFmpeg and clean up apt caches.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install py-tgcalls and Pyrogram for the Telegram voice streamer.
+RUN pip install --no-cache-dir py-tgcalls==2.3.3 pyrogram
+
 COPY --from=server /app/bin/main .
 COPY --from=player /app/dist ./web/player/dist
 COPY --from=studio /app/dist ./web/studio/dist
+COPY tools/ ./tools/
+
 EXPOSE 7331
 ENTRYPOINT ["./main"]

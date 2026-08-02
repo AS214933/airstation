@@ -5,6 +5,8 @@ import {
     ResponseErr,
     ResponseOK,
     StationInfo,
+    TelegramVoiceConfig,
+    TelegramVoicePublicConfig,
 } from "./types";
 import { jsonRequestParams } from "./utils";
 
@@ -65,6 +67,22 @@ class AirstationAPI {
     async editStationInfo(info: StationInfo) {
         const url = `${this.url()}/station/info`;
         return await this.makeRequest<StationInfo>(url, jsonRequestParams("PUT", info));
+    }
+
+
+    async getTelegramVoiceConfig() {
+        const url = `${this.url()}/telegram/config`;
+        return await this.makeRequest<TelegramVoicePublicConfig>(url);
+    }
+
+    async editTelegramVoiceConfig(config: TelegramVoiceConfig) {
+        const url = `${this.url()}/telegram/config`;
+        return await this.makeRequest<TelegramVoicePublicConfig>(url, jsonRequestParams("PUT", config));
+    }
+
+    async testTelegramVoiceConfig(config: TelegramVoiceConfig) {
+        const url = `${this.url()}/telegram/test`;
+        return await this.makeRequest<ResponseOK>(url, jsonRequestParams("POST", config));
     }
 
     private async makeRequest<T>(url: string, params: RequestInit = {}): Promise<T> {

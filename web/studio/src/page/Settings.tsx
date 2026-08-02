@@ -8,6 +8,8 @@ import {
     Flex,
     Group,
     Modal,
+    PasswordInput,
+    Switch,
     Textarea,
     TextInput,
     Tooltip,
@@ -20,7 +22,7 @@ import { IconSettings } from "../icons";
 import { useSettingsStore } from "../store/settings";
 import { MAX_MOBILE_WIDTH, useIsMobile } from "../hooks/useIsMobile";
 import { useForm } from "@mantine/form";
-import { StationInfo } from "../api/types";
+import { StationInfo, TelegramVoiceConfig, TelegramVoicePublicConfig } from "../api/types";
 import { airstationAPI } from "../api";
 import { errNotify, okNotify } from "../notifications";
 
@@ -167,6 +169,13 @@ export const SettingsModal: FC<{}> = () => {
                         </Accordion.Panel>
                     </Accordion.Item>
 
+                    <Accordion.Item value="telegram_voice">
+                        <Accordion.Control>Telegram voice stream</Accordion.Control>
+                        <Accordion.Panel>
+                            <TelegramVoiceSetup loading={loading} setLoading={setLoading} />
+                        </Accordion.Panel>
+                    </Accordion.Item>
+
                     {!isMobile && (
                         <Accordion.Item value="studio_interface">
                             <Accordion.Control>Studio interface</Accordion.Control>
@@ -228,6 +237,149 @@ const predefinedThemes = {
     Hackerman: "#000000;#000000;#04e600;#04e600;#04e600;",
     "Just dark": "#000000;#000000;#a8a8a8;#ffffff;;",
     "Just light": "#ffffff;#ffffff;#a8a8a8;#000000;;",
+};
+
+
+const TelegramVoiceSetup: FC<{
+    loading: boolean;
+    setLoading: (loading: boolean) => void;
+}> = ({ loading, setLoading }) => {
+    const [config, setConfig] = useState<TelegramVoicePublicConfig | null>(null);
+    const [testing, setTesting] = useState(false);
+    const form = useForm<TelegramVoiceConfig>({
+        initialValues: {
+            enabled: false,
+            apiID: 0,
+            apiHash: "",
+            sessionString: "",
+            streamURL: "",
+            chatIDs: [],
+        },
+    });
+
+    const chatIDsValue = form.values.chatIDs.join(",");
+
+    const loadConfig = async () => {
+        setLoading(true);
+        try {
+            const next = await airstationAPI.getTelegramVoiceConfig();
+            setConfig(next);
+            form.setValues({
+                enabled: next.enabled,
+                apiID: 0,
+                apiHash: "",
+                sessionString: "",
+                streamURL: next.streamURL || `${window.location.origin}/stream`,
+                chatIDs: next.chatIDs || [],
+            });
+        } catch (error) {
+            errNotify(error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const saveConfig = async () => {
+        setLoading(true);
+        try {
+            const next = await airstationAPI.editTelegramVoiceConfig(form.values);
+            setConfig(next);
+            form.setFieldValue("apiHash", "");
+            form.setFieldValue("sessionString", "");
+            okNotify("Telegram voice stream settings saved");
+        } catch (error) {
+            errNotify(error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const testCredentials = async () => {
+        setTesting(true);
+        try {
+            await airstationAPI.testTelegramVoiceConfig(form.values);
+            okNotify("Telegram credentials are valid");
+        } catch (error) {
+            errNotify(error);
+        } finally {
+            setTesting(false);
+        }
+    };
+
+    useEffect(() => {
+        loadConfig();
+    }, []);
+
+    return (
+        <Flex direction="column" gap="sm">
+            <Text size="sm" c="dimmed">
+                Stream the Airstation HLS feed live into Telegram group or channel voice chats.
+                This requires a Telegram user account (API ID, API hash, and a session string),
+                not just a bot token.
+            </Text>
+
+            <Switch
+                label="Enable Telegram voice stream"
+                disabled={loading}
+                {...form.getInputProps("enabled", { type: "checkbox" })}
+            />
+
+            <TextInput
+                label="Telegram API ID"
+                placeholder="123456"
+                type="number"
+                disabled={loading}
+                {...form.getInputProps("apiID")}
+            />
+
+            <PasswordInput
+                label="Telegram API hash"
+                placeholder={config?.hasAPIHash ? "Saved. Leave empty to keep it." : "Paste API hash"}
+                disabled={loading}
+                {...form.getInputProps("apiHash")}
+            />
+
+            <PasswordInput
+                label="Session string"
+                placeholder={config?.hasSession ? "Saved. Leave empty to keep it." : "Paste session string"}
+                description="Run python tools/telegram_login.py to generate one."
+                disabled={loading}
+                {...form.getInputProps("sessionString")}
+            />
+
+            <TextInput
+                label="Airstation stream URL"
+                placeholder="http://localhost:7331/stream"
+                description="The public HLS playlist URL that py-tgcalls will consume."
+                disabled={loading}
+                {...form.getInputProps("streamURL")}
+            />
+
+            <Textarea
+                label="Chat IDs"
+                placeholder="-1001234567890, -1009876543210"
+                description="Comma-separated list of Telegram group/channel IDs."
+                rows={3}
+                disabled={loading}
+                value={chatIDsValue}
+                onChange={(e) => form.setFieldValue("chatIDs", e.target.value.split(",").map((c) => c.trim()))}
+            />
+
+            <Group mt="sm" justify="space-between">
+                <Button
+                    variant="light"
+                    loading={testing}
+                    onClick={testCredentials}
+                    disabled={!form.values.apiID || (!form.values.apiHash && !config?.hasAPIHash) || (!form.values.sessionString && !config?.hasSession)}
+                >
+                    Test credentials
+                </Button>
+                <Button loading={loading} onClick={saveConfig}>
+                    Save
+                </Button>
+            </Group>
+        </Flex>
+    );
 };
 
 const PlayerThemeSetup: FC<{

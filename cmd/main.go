@@ -40,14 +40,19 @@ func main() {
 
 	httpServer := http.NewServer(store, conf, log)
 	go httpServer.Run()
+	_ = httpServer
 
 	<-stopSignal
-	shutdown(log, store)
+	shutdown(log, httpServer, store)
 }
 
-func shutdown(log *slog.Logger, store storage.Storage) {
+func shutdown(log *slog.Logger, srv *http.Server, store storage.Storage) {
 	println()
 	log.Info("Shutting down the app...")
+
+	if err := srv.Shutdown(); err != nil {
+		log.Error("Failed to shutdown HTTP server: " + err.Error())
+	}
 
 	err := store.Close()
 	if err != nil {

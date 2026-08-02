@@ -59,6 +59,35 @@ Set `AIRSTATION_NETEASE_REAL_IP` to another mainland IP if needed, or set it to 
 Temporary HLS files in `AIRSTATION_TMP_DIR` are cleaned automatically after 24 hours by default.
 Set `AIRSTATION_TMP_RETENTION` to another Go duration such as `12h` or `48h` if you need a different retention window.
 
+### Telegram voice stream (optional)
+
+You can stream the Airstation HLS feed live into one or more Telegram group/channel voice chats. This requires:
+
+- A Telegram **user account** (bots cannot stream audio into voice chats).
+- Your `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
+- A Pyrogram session string, generated once with the helper script.
+
+Steps:
+
+1. Get your `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
+2. Generate a session string:
+   ```sh
+   docker exec -it <airstation-container> python3 tools/telegram_login.py <api_id> <api_hash>
+   ```
+   Or, if running from source:
+   ```sh
+   python3 tools/telegram_login.py <api_id> <api_hash>
+   ```
+3. In the Studio settings, open **Telegram voice stream**, enable it, and paste:
+   - API ID
+   - API hash
+   - Session string
+   - The public Airstation HLS stream URL (e.g. `http://your-host:7331/stream`)
+   - Comma-separated Telegram chat IDs (e.g. `-1001234567890`)
+4. Click **Test credentials**, then **Save**. Airstation starts a py-tgcalls subprocess that joins the voice chats and streams the same HLS feed the web player uses.
+
+> The Telegram user account must already be a member of the target group or channel, and the group/channel must have an active voice/video chat. The configuration is hot-reloaded: saving new settings restarts the streamer without restarting Airstation.
+
 To stop the container, just type:
 
 ```sh
@@ -107,6 +136,12 @@ npm ci --prefix ./web/player
 
 ```sh
 npm ci --prefix ./web/studio
+```
+
+If you plan to use Telegram voice streaming, also install Python and py-tgcalls:
+
+```sh
+pip install py-tgcalls==2.3.3 pyrogram
 ```
 
 3. Build web clients
