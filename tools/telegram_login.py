@@ -61,7 +61,7 @@ async def send_code(api_id: int, api_hash: str, phone: str):
     await client.connect()
     try:
         sent = await client.send_code(phone)
-        result = {"phone_code_hash": sent.phone_code_hash}
+        result = {"phoneCodeHash": sent.phone_code_hash}
         if sent.type:
             try:
                 result["type"] = sent.type.__class__.__name__
