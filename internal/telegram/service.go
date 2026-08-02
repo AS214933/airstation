@@ -1,97 +1,51 @@
 package telegram
 
 import (
-	"bytes"
+	"bufio"
 	"context"
-	"encoding/json"
-	"errors"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"log/slog"
+	"math/rand"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-faster/errors"
+
+	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/telegram/calls"
+	"github.com/gotd/td/tg"
+	"github.com/pion/rtp"
 )
 
 // ErrPasswordNeeded is returned by SignInUserbot when the account requires
 // a 2FA password to complete sign-in.
 var ErrPasswordNeeded = errors.New("2FA password required")
 
-// StreamRunnerFactory creates a StreamRunner for the given configuration.
-type StreamRunnerFactory func(ctx context.Context, cfg Config, workDir, pythonBin string) (StreamRunner, error)
-
-// StreamRunner abstracts spawning the external Python streamer process.
-// It is satisfied by *exec.Cmd in production and can be stubbed in tests.
-type StreamRunner interface {
-	Start() error
-	Wait() error
-	Process() *os.Process
-}
-
-type execCmdRunner struct {
-	*exec.Cmd
-}
-
-func (r *execCmdRunner) Start() error { return r.Cmd.Start() }
-func (r *execCmdRunner) Wait() error  { return r.Cmd.Wait() }
-func (r *execCmdRunner) Process() *os.Process {
-	return r.Cmd.Process
-}
-
-func defaultRunnerFactory(ctx context.Context, cfg Config, workDir, pythonBin string) (StreamRunner, error) {
-	payload, err := json.Marshal(map[string]any{
-		"api_id":         cfg.APIID,
-		"api_hash":       cfg.APIHash,
-		"session_string": cfg.SessionString,
-		"stream_url":     cfg.StreamURL,
-		"chat_ids":       cfg.ChatIDs,
-		"workdir":        workDir,
-		"log_level":      "INFO",
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	cmd := exec.CommandContext(ctx, pythonBin, filepath.Join("tools", "telegram_streamer.py"), "-")
-	cmd.Stdin = bytes.NewReader(payload)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Dir, _ = os.Getwd()
-
-	return &execCmdRunner{cmd}, nil
-}
-
-// Service manages Telegram voice stream configuration and the Python streamer subprocess.
+// Service manages Telegram voice stream configuration and the in-process gotd
+// voice streamer.
 type Service struct {
-	store        Store
-	logger       *slog.Logger
-	workDir      string
-	loginWorkDir string
-	pythonBin    string
+	store  Store
+	logger *slog.Logger
 
-	mutex         sync.RWMutex
-	loginMutex    sync.Mutex
-	config        Config
-	proc          StreamRunner
-	procCtx       context.Context
-	procCancel    context.CancelFunc
-	procErr       error
-	runnerFactory StreamRunnerFactory
+	mutex        sync.RWMutex
+	config       Config
+	streamCtx    context.Context
+	streamCancel context.CancelFunc
+	streamWg     sync.WaitGroup
 }
 
 // NewService creates a new Telegram voice stream service.
 func NewService(store Store, log *slog.Logger) *Service {
-	workDir := filepath.Join("storage", "telegram")
 	return &Service{
-		store:         store,
-		logger:        log.WithGroup("telegram"),
-		workDir:       workDir,
-		loginWorkDir:  filepath.Join(workDir, "login"),
-		pythonBin:     "python3",
-		runnerFactory: defaultRunnerFactory,
+		store:  store,
+		logger: log.WithGroup("telegram"),
 	}
 }
 
@@ -196,7 +150,7 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 			return PublicConfig{}, errors.New("Telegram API hash is required")
 		}
 		if strings.TrimSpace(newConfig.SessionString) == "" {
-			return PublicConfig{}, errors.New("Telegram session string is required; log in via the userbot login flow first")
+			return PublicConfig{}, errors.New("Telegram session is required; log in via the userbot login flow first")
 		}
 		if len(newConfig.ChatIDs) == 0 {
 			return PublicConfig{}, errors.New("at least one Telegram chat ID is required")
@@ -204,13 +158,6 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 		if strings.TrimSpace(newConfig.StreamURL) == "" {
 			return PublicConfig{}, errors.New("stream URL is required")
 		}
-	}
-
-	if _, err := s.store.UpsertStationProperty(propEnabled, strconv.FormatBool(newConfig.Enabled)); err != nil {
-		return PublicConfig{}, err
-	}
-	if _, err := s.store.UpsertStationProperty(propAPIID, strconv.Itoa(newConfig.APIID.Int())); err != nil {
-		return PublicConfig{}, err
 	}
 
 	cleanedIDs := make([]string, 0, len(newConfig.ChatIDs))
@@ -227,6 +174,12 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 	newConfig.ChatIDs = cleanedIDs
 	newConfig.StreamURL = strings.TrimSpace(newConfig.StreamURL)
 
+	if _, err := s.store.UpsertStationProperty(propEnabled, strconv.FormatBool(newConfig.Enabled)); err != nil {
+		return PublicConfig{}, err
+	}
+	if _, err := s.store.UpsertStationProperty(propAPIID, strconv.Itoa(newConfig.APIID.Int())); err != nil {
+		return PublicConfig{}, err
+	}
 	if _, err := s.store.UpsertStationProperty(propAPIHash, newConfig.APIHash); err != nil {
 		return PublicConfig{}, err
 	}
@@ -257,10 +210,7 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 	return s.PublicConfig(), nil
 }
 
-// Test validates Telegram credentials by attempting a quick Pyrogram connection.
-// It spawns a short-lived Python one-liner using the configured credentials.
-// Empty fields are merged with the stored configuration so the UI can test
-// credentials without sending the secret values back from the client.
+// Test validates Telegram credentials by attempting a quick gotd connection.
 func (s *Service) Test(cfg Config) error {
 	s.mutex.RLock()
 	if cfg.APIID == 0 {
@@ -281,49 +231,38 @@ func (s *Service) Test(cfg Config) error {
 		return errors.New("Telegram API hash is required")
 	}
 	if strings.TrimSpace(cfg.SessionString) == "" {
-		return errors.New("Telegram session string is required")
+		return errors.New("Telegram session is required")
 	}
 
-	script := `
-import asyncio, json, sys
-from pyrogram import Client
+	sessionStore := &persistedSessionStorage{s: s}
+	client := telegram.NewClient(cfg.APIID.Int(), cfg.APIHash, telegram.Options{
+		SessionStorage: sessionStore,
+		UpdateHandler:  tg.NewUpdateDispatcher(),
+	})
 
-async def main():
-    client = Client(
-        name="airstation_test",
-        api_id=int(sys.argv[1]),
-        api_hash=sys.argv[2],
-        session_string=sys.argv[3],
-        in_memory=True,
-        no_updates=True,
-    )
-    await client.start()
-    me = await client.get_me()
-    print(json.dumps({"id": me.id, "username": me.username or "", "first_name": me.first_name or "", "is_bot": me.is_bot}))
-    await client.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
-asyncio.run(main())
-`
-	cmd := exec.Command(s.pythonBin, "-c", script, strconv.Itoa(cfg.APIID.Int()), cfg.APIHash, cfg.SessionString)
-	var out bytes.Buffer
-	var errBuf bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("telegram credential test failed: %v: %s", err, errBuf.String())
+	var testErr error
+	err := client.Run(ctx, func(ctx context.Context) error {
+		status, err := client.Auth().Status(ctx)
+		if err != nil {
+			testErr = err
+			return nil
+		}
+		if !status.Authorized {
+			testErr = errors.New("Telegram session is not authorized")
+			return nil
+		}
+		if status.User != nil && status.User.Bot {
+			testErr = errors.New("bot accounts cannot be used for Telegram voice streaming; use a user account")
+		}
+		return nil
+	})
+	if testErr != nil {
+		return testErr
 	}
-
-	var me struct {
-		IsBot bool `json:"is_bot"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &me); err != nil {
-		return fmt.Errorf("parsing telegram account info: %w", err)
-	}
-	if me.IsBot {
-		return errors.New("bot accounts cannot be used for Telegram voice streaming; use a user account")
-	}
-	return nil
+	return err
 }
 
 // resolveAPICredentials returns the provided API credentials when they are set,
@@ -347,28 +286,10 @@ func (s *Service) resolveAPICredentials(apiID int, apiHash string) (int, string,
 	return apiID, apiHash, nil
 }
 
-func (s *Service) loginScriptCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
-	if err := os.MkdirAll(s.loginWorkDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating telegram login workdir failed: %w", err)
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("getting working directory failed: %w", err)
-	}
-
-	script := filepath.Join(cwd, "tools", "telegram_login.py")
-	allArgs := append([]string{script}, args...)
-	cmd := exec.CommandContext(ctx, s.pythonBin, allArgs...)
-	cmd.Dir = s.loginWorkDir
-	return cmd, nil
-}
-
-// loadLoginState reads the persisted userbot login state.
-func (s *Service) loadLoginState() (phone, phoneCodeHash, step string, err error) {
+func (s *Service) loadLoginState() (phone, phoneCodeHash, step, sessionData string, err error) {
 	props, err := s.store.StationProperties()
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	for _, p := range props {
 		switch p.Key {
@@ -378,13 +299,14 @@ func (s *Service) loadLoginState() (phone, phoneCodeHash, step string, err error
 			phoneCodeHash = p.Value
 		case propLoginStep:
 			step = p.Value
+		case propLoginSessionData:
+			sessionData = p.Value
 		}
 	}
-	return phone, phoneCodeHash, step, nil
+	return phone, phoneCodeHash, step, sessionData, nil
 }
 
-// saveLoginState persists the userbot login state.
-func (s *Service) saveLoginState(phone, phoneCodeHash, step string) error {
+func (s *Service) saveLoginState(phone, phoneCodeHash, step, sessionData string) error {
 	if _, err := s.store.UpsertStationProperty(propLoginPhone, phone); err != nil {
 		return err
 	}
@@ -394,14 +316,17 @@ func (s *Service) saveLoginState(phone, phoneCodeHash, step string) error {
 	if _, err := s.store.UpsertStationProperty(propLoginStep, step); err != nil {
 		return err
 	}
+	if _, err := s.store.UpsertStationProperty(propLoginSessionData, sessionData); err != nil {
+		return err
+	}
 	return nil
 }
 
-// clearLoginState removes the persisted userbot login state.
 func (s *Service) clearLoginState() error {
 	_ = s.store.DeleteStationProperty(propLoginPhone)
 	_ = s.store.DeleteStationProperty(propLoginPhoneCodeHash)
 	_ = s.store.DeleteStationProperty(propLoginStep)
+	_ = s.store.DeleteStationProperty(propLoginSessionData)
 	return nil
 }
 
@@ -409,64 +334,66 @@ func (s *Service) clearLoginState() error {
 // It returns the phone_code_hash needed for SignInUserbot and persists the
 // login state so the 2FA step can continue later.
 func (s *Service) SendLoginCode(phone string, apiID int, apiHash string) (string, error) {
-	s.loginMutex.Lock()
-	defer s.loginMutex.Unlock()
-
+	apiID, apiHash, err := s.resolveAPICredentials(apiID, apiHash)
+	if err != nil {
+		return "", err
+	}
 	phone = strings.TrimSpace(phone)
 	if phone == "" {
 		return "", errors.New("phone number is required")
 	}
 
-	apiID, apiHash, err := s.resolveAPICredentials(apiID, apiHash)
-	if err != nil {
-		return "", err
-	}
+	s.clearLoginState()
 
-	if err := s.clearLoginState(); err != nil {
-		return "", err
-	}
+	sessionStore := &memorySessionStorage{}
+	client := telegram.NewClient(apiID, apiHash, telegram.Options{
+		SessionStorage: sessionStore,
+		UpdateHandler:  tg.NewUpdateDispatcher(),
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd, err := s.loginScriptCmd(ctx, "send-code", strconv.Itoa(apiID), apiHash, phone)
+	var codeHash string
+	var runErr error
+	err = client.Run(ctx, func(ctx context.Context) error {
+		sentCode, err := client.Auth().SendCode(ctx, phone, auth.SendCodeOptions{})
+		if err != nil {
+			runErr = err
+			return nil
+		}
+		switch s := sentCode.(type) {
+		case *tg.AuthSentCode:
+			codeHash = s.PhoneCodeHash
+		default:
+			runErr = fmt.Errorf("unexpected sent code type %T", sentCode)
+		}
+		return nil
+	})
+	if runErr != nil {
+		return "", runErr
+	}
 	if err != nil {
 		return "", err
 	}
-
-	var out bytes.Buffer
-	var errBuf bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("telegram send-login-code failed: %w: %s", err, errBuf.String())
-	}
-
-	var resp LoginCodeResponse
-	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
-		return "", fmt.Errorf("parsing login code response: %w", err)
-	}
-	if resp.PhoneCodeHash == "" {
+	if codeHash == "" {
 		return "", errors.New("login code response did not include phone_code_hash")
 	}
 
-	if err := s.saveLoginState(phone, resp.PhoneCodeHash, "code_sent"); err != nil {
+	encodedSession := base64.StdEncoding.EncodeToString(sessionStore.bytes())
+	if err := s.saveLoginState(phone, codeHash, "code_sent", encodedSession); err != nil {
 		return "", err
 	}
 
-	return resp.PhoneCodeHash, nil
+	return codeHash, nil
 }
 
 // SignInUserbot completes a userbot login with the verification code and optional
 // 2FA password. If the account requires a password, it returns ErrPasswordNeeded
 // and the caller must retry with the password. On success the resulting session
-// string is persisted and the streamer is restarted so the new session takes
+// data is persisted and the streamer is restarted so the new session takes
 // effect immediately.
 func (s *Service) SignInUserbot(phone, phoneCodeHash, code, password string, apiID int, apiHash string) error {
-	s.loginMutex.Lock()
-	defer s.loginMutex.Unlock()
-
 	apiID, apiHash, err := s.resolveAPICredentials(apiID, apiHash)
 	if err != nil {
 		return err
@@ -483,71 +410,63 @@ func (s *Service) SignInUserbot(phone, phoneCodeHash, code, password string, api
 		return errors.New("login code is required")
 	}
 
+	storedPhone, storedHash, step, encodedSession, err := s.loadLoginState()
+	if err != nil {
+		return err
+	}
+	awaitingPassword := step == "awaiting_password" && storedHash == phoneCodeHash && storedPhone == phone
+
+	sessionData, err := base64.StdEncoding.DecodeString(encodedSession)
+	if err != nil {
+		return fmt.Errorf("decoding login session: %w", err)
+	}
+
+	sessionStore := &memorySessionStorage{data: sessionData}
+	client := telegram.NewClient(apiID, apiHash, telegram.Options{
+		SessionStorage: sessionStore,
+		UpdateHandler:  tg.NewUpdateDispatcher(),
+	})
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// If we already know a password is required, finish the login with the
-	// stored session instead of trying to consume the code again.
-	_, storedHash, step, err := s.loadLoginState()
+	var signInErr error
+	err = client.Run(ctx, func(ctx context.Context) error {
+		if awaitingPassword && password != "" {
+			_, signInErr = client.Auth().Password(ctx, password)
+			return nil
+		}
+
+		_, signInErr = client.Auth().SignIn(ctx, phone, code, phoneCodeHash)
+		if errors.Is(signInErr, auth.ErrPasswordAuthNeeded) {
+			if password == "" {
+				signInErr = ErrPasswordNeeded
+				return nil
+			}
+			_, signInErr = client.Auth().Password(ctx, password)
+		}
+		return nil
+	})
+	if signInErr != nil {
+		if errors.Is(signInErr, ErrPasswordNeeded) {
+			if err := s.saveLoginState(phone, phoneCodeHash, "awaiting_password", base64.StdEncoding.EncodeToString(sessionStore.bytes())); err != nil {
+				return err
+			}
+			return ErrPasswordNeeded
+		}
+		return signInErr
+	}
 	if err != nil {
 		return err
 	}
-	awaitingPassword := step == "awaiting_password" && storedHash == phoneCodeHash
 
-	var cmd *exec.Cmd
-	if awaitingPassword && password != "" {
-		cmd, err = s.loginScriptCmd(ctx, "check-password", strconv.Itoa(apiID), apiHash, phone, "--password", password)
-	} else {
-		args := []string{
-			"sign-in",
-			strconv.Itoa(apiID),
-			apiHash,
-			phone,
-			phoneCodeHash,
-			code,
-		}
-		if password != "" {
-			args = append(args, "--password", password)
-		}
-		cmd, err = s.loginScriptCmd(ctx, args...)
-	}
-	if err != nil {
-		return err
-	}
-
-	var out bytes.Buffer
-	var errBuf bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("telegram sign-in failed: %w: %s", err, errBuf.String())
-	}
-
-	var result struct {
-		NeedsPassword bool   `json:"needsPassword"`
-		SessionString string `json:"sessionString"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
-		return fmt.Errorf("parsing sign-in response: %w", err)
-	}
-
-	if result.NeedsPassword {
-		if err := s.saveLoginState(phone, phoneCodeHash, "awaiting_password"); err != nil {
-			return err
-		}
-		return ErrPasswordNeeded
-	}
-	if result.SessionString == "" {
-		return errors.New("sign-in did not return a session string")
-	}
-
-	if _, err := s.store.UpsertStationProperty(propSessionString, result.SessionString); err != nil {
+	encoded := base64.StdEncoding.EncodeToString(sessionStore.bytes())
+	if _, err := s.store.UpsertStationProperty(propSessionString, encoded); err != nil {
 		return err
 	}
 
 	s.mutex.Lock()
-	s.config.SessionString = result.SessionString
+	s.config.SessionString = encoded
 	enabled := s.config.Enabled
 	s.mutex.Unlock()
 
@@ -584,7 +503,7 @@ func (s *Service) ClearSession() error {
 	return nil
 }
 
-// Start spawns the Python streamer subprocess if enabled and not already running.
+// Start spawns the gotd voice streamer goroutine if enabled and not already running.
 func (s *Service) Start() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -595,59 +514,37 @@ func (s *Service) Start() error {
 	if s.config.APIID == 0 || s.config.APIHash == "" || s.config.SessionString == "" || len(s.config.ChatIDs) == 0 {
 		return errors.New("Telegram voice stream is enabled but not fully configured")
 	}
-	if s.proc != nil && s.proc.Process() != nil {
+	if s.streamCtx != nil {
 		return nil
 	}
 
-	if err := os.MkdirAll(s.workDir, 0o755); err != nil {
-		return fmt.Errorf("creating telegram workdir failed: %w", err)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
-	runner, err := s.runnerFactory(ctx, s.config, s.workDir, s.pythonBin)
-	if err != nil {
-		cancel()
-		return fmt.Errorf("creating telegram streamer runner failed: %w", err)
-	}
-
-	if err := runner.Start(); err != nil {
-		cancel()
-		return fmt.Errorf("starting telegram streamer failed: %w", err)
-	}
-
-	s.proc = runner
-	s.procCtx = ctx
-	s.procCancel = cancel
-	s.procErr = nil
+	s.streamCtx = ctx
+	s.streamCancel = cancel
+	s.streamWg.Add(1)
+	go s.streamLoop(ctx)
 
 	s.logger.Info("Telegram voice streamer started")
-
-	go s.watchProcess(ctx, cancel)
-
 	return nil
 }
 
-// Stop terminates the running streamer subprocess.
+// Stop terminates the running streamer goroutine.
 func (s *Service) Stop() error {
 	s.mutex.Lock()
-	proc := s.proc
-	cancel := s.procCancel
-	s.proc = nil
-	s.procCancel = nil
+	cancel := s.streamCancel
+	s.streamCancel = nil
+	s.streamCtx = nil
 	s.mutex.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
-	if proc != nil && proc.Process() != nil {
-		_ = proc.Process().Kill()
-		_ = proc.Wait()
-	}
+	s.streamWg.Wait()
 	s.logger.Info("Telegram voice streamer stopped")
 	return nil
 }
 
-// Restart stops and then starts the streamer subprocess.
+// Restart stops and then starts the streamer.
 func (s *Service) Restart() error {
 	if err := s.Stop(); err != nil {
 		s.logger.Warn("Error stopping streamer during restart", slog.String("error", err.Error()))
@@ -655,34 +552,62 @@ func (s *Service) Restart() error {
 	return s.Start()
 }
 
-func (s *Service) watchProcess(ctx context.Context, cancel context.CancelFunc) {
+func (s *Service) streamLoop(ctx context.Context) {
+	defer s.streamWg.Done()
+
 	s.mutex.RLock()
-	proc := s.proc
+	apiID := s.config.APIID.Int()
+	apiHash := s.config.APIHash
+	chatIDs := append([]string(nil), s.config.ChatIDs...)
+	streamURL := s.config.StreamURL
 	s.mutex.RUnlock()
 
-	if proc == nil {
-		return
-	}
+	sessionStore := &persistedSessionStorage{s: s}
+	dispatcher := tg.NewUpdateDispatcher()
+	client := telegram.NewClient(apiID, apiHash, telegram.Options{
+		SessionStorage: sessionStore,
+		UpdateHandler:  dispatcher,
+	})
 
-	err := proc.Wait()
+	if err := client.Run(ctx, func(ctx context.Context) error {
+		status, err := client.Auth().Status(ctx)
+		if err != nil {
+			return fmt.Errorf("auth status: %w", err)
+		}
+		if !status.Authorized {
+			return errors.New("Telegram session is not authorized")
+		}
+		self, err := client.Self(ctx)
+		if err != nil {
+			return fmt.Errorf("get self: %w", err)
+		}
+		joinAs := &tg.InputPeerUser{UserID: self.ID, AccessHash: self.AccessHash}
 
-	s.mutex.Lock()
-	if s.proc == proc {
-		s.procErr = err
-		s.proc = nil
-		s.procCancel = nil
-	}
-	s.mutex.Unlock()
+		peers, err := fetchInputPeers(ctx, client.API())
+		if err != nil {
+			s.logger.Warn("Failed to fetch input peers", slog.String("error", err.Error()))
+		}
 
-	if ctx.Err() == context.Canceled {
-		return
-	}
-
-	if err != nil {
+		var wg sync.WaitGroup
+		for _, idStr := range chatIDs {
+			id, err := strconv.ParseInt(idStr, 10, 64)
+			if err != nil {
+				s.logger.Warn("Skipping invalid chat ID", slog.String("id", idStr))
+				continue
+			}
+			wg.Add(1)
+			go func(chatID int64) {
+				defer wg.Done()
+				s.streamChat(ctx, client.API(), joinAs, peers, chatID, streamURL)
+			}(id)
+		}
+		wg.Wait()
+		return nil
+	}); err != nil && !errors.Is(err, context.Canceled) {
 		s.logger.Error("Telegram streamer exited", slog.String("error", err.Error()))
 	}
 
-	// Restart with exponential backoff if still enabled.
+	// Restart with backoff if still enabled.
 	s.mutex.RLock()
 	enabled := s.config.Enabled
 	s.mutex.RUnlock()
@@ -695,4 +620,338 @@ func (s *Service) watchProcess(ctx context.Context, cancel context.CancelFunc) {
 			s.logger.Error("Telegram streamer restart failed", slog.String("error", err.Error()))
 		}
 	}
+}
+
+func (s *Service) streamChat(ctx context.Context, api *tg.Client, joinAs *tg.InputPeerUser, peers map[int64]tg.InputPeerClass, chatID int64, streamURL string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		call, err := resolveGroupCall(ctx, api, peers, chatID)
+		if err != nil {
+			s.logger.Warn("No active group call for chat", slog.Int64("chat", chatID), slog.String("error", err.Error()))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+				continue
+			}
+		}
+
+		gc := calls.NewGroupCall(api, calls.Options{})
+		gc.OnConnected(func() {
+			s.logger.Info("Joined voice chat", slog.Int64("chat", chatID))
+		})
+		gc.OnDisconnected(func() {
+			s.logger.Info("Left voice chat", slog.Int64("chat", chatID))
+		})
+
+		if err := gc.Join(ctx, call, joinAs); err != nil {
+			s.logger.Warn("Failed to join voice chat", slog.Int64("chat", chatID), slog.String("error", err.Error()))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+
+		streamErr := streamAudio(ctx, gc.WriteAudio, streamURL)
+		if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
+			s.logger.Warn("Audio stream ended", slog.Int64("chat", chatID), slog.String("error", streamErr.Error()))
+		}
+
+		if err := gc.Leave(ctx); err != nil {
+			s.logger.Warn("Failed to leave voice chat", slog.Int64("chat", chatID), slog.String("error", err.Error()))
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+func resolveGroupCall(ctx context.Context, api *tg.Client, peers map[int64]tg.InputPeerClass, chatID int64) (*tg.InputGroupCall, error) {
+	peer, ok := peers[chatID]
+	if !ok {
+		return nil, fmt.Errorf("chat %d not found in peer list", chatID)
+	}
+
+	switch p := peer.(type) {
+	case *tg.InputPeerChannel:
+		full, err := api.ChannelsGetFullChannel(ctx, &tg.InputChannel{
+			ChannelID:  p.ChannelID,
+			AccessHash: p.AccessHash,
+		})
+		if err != nil {
+			return nil, err
+		}
+		cf, ok := full.FullChat.(*tg.ChannelFull)
+		if !ok {
+			return nil, fmt.Errorf("unexpected full chat %T", full.FullChat)
+		}
+		call, ok := cf.Call.(*tg.InputGroupCall)
+		if !ok {
+			return nil, errors.New("no active group call")
+		}
+		return call, nil
+	case *tg.InputPeerChat:
+		full, err := api.MessagesGetFullChat(ctx, p.ChatID)
+		if err != nil {
+			return nil, err
+		}
+		cf, ok := full.FullChat.(*tg.ChatFull)
+		if !ok {
+			return nil, fmt.Errorf("unexpected full chat %T", full.FullChat)
+		}
+		call, ok := cf.Call.(*tg.InputGroupCall)
+		if !ok {
+			return nil, errors.New("no active group call")
+		}
+		return call, nil
+	default:
+		return nil, fmt.Errorf("unsupported peer type %T", peer)
+	}
+}
+
+func fetchInputPeers(ctx context.Context, api *tg.Client) (map[int64]tg.InputPeerClass, error) {
+	peers := make(map[int64]tg.InputPeerClass)
+
+	offsetDate := 0
+	offsetID := 0
+	offsetPeer := tg.InputPeerClass(&tg.InputPeerEmpty{})
+
+	for {
+		dialogs, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+			OffsetDate: offsetDate,
+			OffsetID:   offsetID,
+			OffsetPeer: offsetPeer,
+			Limit:      200,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		var dslice []tg.DialogClass
+		var chats []tg.ChatClass
+		var messages []tg.MessageClass
+		switch d := dialogs.(type) {
+		case *tg.MessagesDialogs:
+			dslice = d.Dialogs
+			chats = d.Chats
+			messages = d.Messages
+		case *tg.MessagesDialogsSlice:
+			dslice = d.Dialogs
+			chats = d.Chats
+			messages = d.Messages
+		default:
+			return nil, fmt.Errorf("unexpected dialogs type %T", dialogs)
+		}
+		if len(dslice) == 0 {
+			break
+		}
+
+		chatMap := make(map[int64]tg.ChatClass)
+		for _, c := range chats {
+			chatMap[c.GetID()] = c
+		}
+
+		for _, dialog := range dslice {
+			d, ok := dialog.(*tg.Dialog)
+			if !ok {
+				continue
+			}
+			peer, ok := d.Peer.(tg.PeerClass)
+			if !ok {
+				continue
+			}
+			switch p := peer.(type) {
+			case *tg.PeerChannel:
+				if ch, ok := chatMap[p.ChannelID].(*tg.Channel); ok {
+					peers[p.ChannelID] = &tg.InputPeerChannel{ChannelID: ch.ID, AccessHash: ch.AccessHash}
+				}
+			case *tg.PeerChat:
+				peers[p.ChatID] = &tg.InputPeerChat{ChatID: p.ChatID}
+			}
+		}
+
+		last, ok := dslice[len(dslice)-1].(*tg.Dialog)
+		if !ok {
+			break
+		}
+		msgDate, msgID := topMessageDate(messages, last.TopMessage)
+		if msgID == 0 {
+			break
+		}
+		offsetDate = msgDate
+		offsetID = msgID
+		// Use the last dialog's peer as the next offset peer if we have it.
+		var lastPeerID int64
+		switch p := last.Peer.(type) {
+		case *tg.PeerChannel:
+			lastPeerID = p.ChannelID
+		case *tg.PeerChat:
+			lastPeerID = p.ChatID
+		case *tg.PeerUser:
+			lastPeerID = p.UserID
+		}
+		if nextPeer, ok := peers[lastPeerID]; ok {
+			offsetPeer = nextPeer
+		} else {
+			break
+		}
+	}
+
+	return peers, nil
+}
+
+func topMessageDate(messages []tg.MessageClass, topMsgID int) (int, int) {
+	if topMsgID == 0 {
+		return 0, 0
+	}
+	for _, m := range messages {
+		msg, ok := m.(*tg.Message)
+		if !ok {
+			continue
+		}
+		if msg.ID == topMsgID {
+			return msg.Date, msg.ID
+		}
+	}
+	return 0, 0
+}
+
+// streamAudio transcodes the stream URL to Opus with ffmpeg and feeds it to write
+// as RTP packets, pacing in real time. It blocks until ctx is cancelled or the
+// source ends.
+func streamAudio(ctx context.Context, write func(*rtp.Packet) error, streamURL string) error {
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-reconnect", "1",
+		"-reconnect_at_eof", "1",
+		"-reconnect_streamed", "1",
+		"-reconnect_delay_max", "5",
+		"-timeout", "10000000",
+		"-i", streamURL,
+		"-vn",
+		"-ac", "2", "-ar", "48000",
+		"-c:a", "libopus", "-b:a", "64k", "-application", "voip",
+		"-frame_duration", "20",
+		"-f", "ogg", "pipe:1",
+	)
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("ffmpeg stdout: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start ffmpeg: %w", err)
+	}
+	defer func() { _ = cmd.Wait() }()
+
+	ogg := &oggDemuxer{r: bufio.NewReader(stdout)}
+	for range 2 {
+		if _, err := ogg.next(); err != nil {
+			return fmt.Errorf("read opus header: %w", err)
+		}
+	}
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	seq := uint16(rand.Uint32()) //nolint:gosec
+	ts := rand.Uint32()          //nolint:gosec
+	opusSamples := uint32(48000 / 1000 * 20)
+	marker := true
+	for {
+		frame, err := ogg.next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read opus frame: %w", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+
+		seq++
+		ts += opusSamples
+		if err := write(&rtp.Packet{
+			Header: rtp.Header{
+				Version:        2,
+				Marker:         marker,
+				PayloadType:    111,
+				SequenceNumber: seq,
+				Timestamp:      ts,
+			},
+			Payload: frame,
+		}); err != nil {
+			if errors.Is(err, io.ErrClosedPipe) {
+				return nil
+			}
+			return fmt.Errorf("write rtp: %w", err)
+		}
+		marker = false
+	}
+}
+
+type oggDemuxer struct {
+	r     io.Reader
+	queue [][]byte
+	cur   []byte
+}
+
+func (d *oggDemuxer) next() ([]byte, error) {
+	for len(d.queue) == 0 {
+		if err := d.readPage(); err != nil {
+			return nil, err
+		}
+	}
+	pkt := d.queue[0]
+	d.queue = d.queue[1:]
+	return pkt, nil
+}
+
+func (d *oggDemuxer) readPage() error {
+	var header [27]byte
+	if _, err := io.ReadFull(d.r, header[:]); err != nil {
+		return err
+	}
+	if string(header[0:4]) != "OggS" {
+		return errors.New("invalid ogg capture pattern")
+	}
+
+	segments := int(header[26])
+	table := make([]byte, segments)
+	if _, err := io.ReadFull(d.r, table); err != nil {
+		return err
+	}
+	total := 0
+	for _, n := range table {
+		total += int(n)
+	}
+	data := make([]byte, total)
+	if _, err := io.ReadFull(d.r, data); err != nil {
+		return err
+	}
+
+	off := 0
+	for _, n := range table {
+		d.cur = append(d.cur, data[off:off+int(n)]...)
+		off += int(n)
+		if n < 255 {
+			d.queue = append(d.queue, d.cur)
+			d.cur = nil
+		}
+	}
+	return nil
 }

@@ -77,18 +77,6 @@ Steps:
 3. Click **Login with Telegram**. Enter the phone number (with country code, e.g. `+8613800138000`), request a code, enter the code from Telegram, and provide the 2FA password if the account has two-step verification enabled. Airstation saves the Pyrogram session string automatically.
 4. Click **Save**, then **Test credentials**. Airstation starts a py-tgcalls subprocess that joins the voice chats and streams the same HLS feed the web player uses.
 
-If you prefer to generate the session string manually, you can still use the helper script:
-
-```sh
-docker exec -it <airstation-container> python3 tools/telegram_login.py <api_id> <api_hash>
-```
-
-Or, if running from source:
-
-```sh
-python3 tools/telegram_login.py <api_id> <api_hash>
-```
-
 > The Telegram user account must already be a member of the target group or channel, and the group/channel must have an active voice/video chat. The configuration is hot-reloaded: saving new settings restarts the streamer without restarting Airstation.
 
 To stop the container, just type:
@@ -141,13 +129,7 @@ npm ci --prefix ./web/player
 npm ci --prefix ./web/studio
 ```
 
-If you plan to use Telegram voice streaming, also install Python and the required packages:
-
-```sh
-pip install py-tgcalls==2.3.3 pyrogrammod==2.4.1
-```
-
-> py-tgcalls 2.3.3 is tested against the `pyrogrammod` fork, not the official `pyrogram` package. Official Pyrogram 2.x is missing symbols such as `GroupcallForbidden`, `GroupcallInvalid` and `InputGroupCallSlug`, which will cause import errors. The Docker image installs `pyrogrammod` automatically.
+If you plan to use Telegram voice streaming, make sure FFmpeg is installed and that it is built with libopus (the Debian/Ubuntu package `ffmpeg` satisfies this).
 
 3. Build web clients
 

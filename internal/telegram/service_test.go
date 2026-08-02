@@ -1,7 +1,6 @@
 package telegram
 
 import (
-	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -39,27 +38,6 @@ func (f *fakeStore) DeleteStationProperty(key string) error {
 	}
 	delete(f.props, key)
 	return nil
-}
-
-type fakeRunner struct {
-	started   bool
-	waitErr   error
-	process   *os.Process
-	waitCalls int
-}
-
-func (f *fakeRunner) Start() error {
-	f.started = true
-	return nil
-}
-
-func (f *fakeRunner) Wait() error {
-	f.waitCalls++
-	return f.waitErr
-}
-
-func (f *fakeRunner) Process() *os.Process {
-	return f.process
 }
 
 func TestServiceLoad(t *testing.T) {
@@ -155,37 +133,6 @@ func TestServiceEditConfigPersists(t *testing.T) {
 	}
 	if store.props[propChatIDs] != "-1001,-1002" {
 		t.Errorf("unexpected chat IDs stored: %q", store.props[propChatIDs])
-	}
-}
-
-func TestServiceStartStop(t *testing.T) {
-	store := &fakeStore{props: map[string]string{
-		propEnabled:       "true",
-		propAPIID:         "123",
-		propAPIHash:       "hash",
-		propSessionString: "sess",
-		propStreamURL:     "http://localhost/stream",
-		propChatIDs:       "-1001",
-	}}
-	svc := NewService(store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	if err := svc.Load(); err != nil {
-		t.Fatalf("Load failed: %v", err)
-	}
-
-	runner := &fakeRunner{}
-	svc.runnerFactory = func(ctx context.Context, cfg Config, workDir, pythonBin string) (StreamRunner, error) {
-		return runner, nil
-	}
-
-	if err := svc.Start(); err != nil {
-		t.Fatalf("Start failed: %v", err)
-	}
-	if !runner.started {
-		t.Error("runner should have been started")
-	}
-
-	if err := svc.Stop(); err != nil {
-		t.Fatalf("Stop failed: %v", err)
 	}
 }
 

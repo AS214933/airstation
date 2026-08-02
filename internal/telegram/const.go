@@ -10,4 +10,5 @@ const (
 	propLoginPhone         = "telegramUserbotLoginPhone"
 	propLoginPhoneCodeHash = "telegramUserbotLoginPhoneCodeHash"
 	propLoginStep          = "telegramUserbotLoginStep"
+	propLoginSessionData   = "telegramUserbotLoginSessionData"
 )
