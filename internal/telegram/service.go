@@ -102,7 +102,7 @@ func (s *Service) Load() error {
 			cfg.Enabled = strings.EqualFold(prop.Value, "true") || prop.Value == "1"
 		case propAPIID:
 			if v, err := strconv.Atoi(prop.Value); err == nil {
-				cfg.APIID = v
+				cfg.APIID = IntString(v)
 			}
 		case propAPIHash:
 			cfg.APIHash = prop.Value
@@ -171,7 +171,7 @@ func (s *Service) PublicConfig() PublicConfig {
 // so changes take effect immediately.
 func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 	if newConfig.Enabled {
-		if newConfig.APIID == 0 {
+		if newConfig.APIID.Int() == 0 {
 			return PublicConfig{}, errors.New("Telegram API ID is required")
 		}
 		if strings.TrimSpace(newConfig.APIHash) == "" {
@@ -213,7 +213,7 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 	if _, err := s.store.UpsertStationProperty(propEnabled, enabled); err != nil {
 		return PublicConfig{}, err
 	}
-	if _, err := s.store.UpsertStationProperty(propAPIID, strconv.Itoa(newConfig.APIID)); err != nil {
+	if _, err := s.store.UpsertStationProperty(propAPIID, strconv.Itoa(newConfig.APIID.Int())); err != nil {
 		return PublicConfig{}, err
 	}
 	if newConfig.APIHash != "" {
@@ -258,7 +258,7 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 // Test validates Telegram credentials by attempting a quick Pyrogram connection.
 // It spawns a short-lived Python one-liner using the configured credentials.
 func (s *Service) Test(cfg Config) error {
-	if cfg.APIID == 0 {
+	if cfg.APIID.Int() == 0 {
 		return errors.New("Telegram API ID is required")
 	}
 	if strings.TrimSpace(cfg.APIHash) == "" {
@@ -300,7 +300,7 @@ async def main():
 
 asyncio.run(main())
 `
-	cmd := exec.Command(s.pythonBin, "-c", script, strconv.Itoa(cfg.APIID), cfg.APIHash, authType, authValue)
+	cmd := exec.Command(s.pythonBin, "-c", script, strconv.Itoa(cfg.APIID.Int()), cfg.APIHash, authType, authValue)
 	var out bytes.Buffer
 	var errBuf bytes.Buffer
 	cmd.Stdout = &out
