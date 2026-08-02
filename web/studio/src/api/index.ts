@@ -7,6 +7,10 @@ import {
     StationInfo,
     TelegramVoiceConfig,
     TelegramVoicePublicConfig,
+    TelegramSendCodeRequest,
+    TelegramSendCodeResponse,
+    TelegramSignInRequest,
+    TelegramSignInResponse,
 } from "./types";
 import { jsonRequestParams } from "./utils";
 
@@ -69,7 +73,6 @@ class AirstationAPI {
         return await this.makeRequest<StationInfo>(url, jsonRequestParams("PUT", info));
     }
 
-
     async getTelegramVoiceConfig() {
         const url = `${this.url()}/telegram/config`;
         return await this.makeRequest<TelegramVoicePublicConfig>(url);
@@ -83,6 +86,21 @@ class AirstationAPI {
     async testTelegramVoiceConfig(config: TelegramVoiceConfig) {
         const url = `${this.url()}/telegram/test`;
         return await this.makeRequest<ResponseOK>(url, jsonRequestParams("POST", config));
+    }
+
+    async sendTelegramLoginCode(request: TelegramSendCodeRequest) {
+        const url = `${this.url()}/telegram/login/code`;
+        return await this.makeRequest<TelegramSendCodeResponse>(url, jsonRequestParams("POST", request));
+    }
+
+    async signInTelegramUserbot(request: TelegramSignInRequest) {
+        const url = `${this.url()}/telegram/login/signin`;
+        return await this.makeRequest<TelegramSignInResponse | ResponseOK>(url, jsonRequestParams("POST", request));
+    }
+
+    async clearTelegramSession() {
+        const url = `${this.url()}/telegram/session`;
+        return await this.makeRequest<ResponseOK>(url, { method: "DELETE" });
     }
 
     private async makeRequest<T>(url: string, params: RequestInit = {}): Promise<T> {

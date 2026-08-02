@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -27,6 +28,17 @@ func (f *fakeStore) UpsertStationProperty(key, value string) (*station.Property,
 	}
 	f.props[key] = value
 	return &station.Property{Key: key, Value: value}, nil
+}
+
+func (f *fakeStore) DeleteStationProperty(key string) error {
+	if f.props == nil {
+		return errors.New("property not found")
+	}
+	if _, ok := f.props[key]; !ok {
+		return errors.New("property not found")
+	}
+	delete(f.props, key)
+	return nil
 }
 
 type fakeRunner struct {
@@ -56,7 +68,6 @@ func TestServiceLoad(t *testing.T) {
 			propEnabled:       "true",
 			propAPIID:         "12345",
 			propAPIHash:       "abc",
-			propBotToken:      "bot:token",
 			propSessionString: "session",
 			propStreamURL:     "http://localhost/stream",
 			propChatIDs:       " -1001 , -1002 ",
@@ -78,15 +89,15 @@ func TestServiceLoad(t *testing.T) {
 	if cfg.APIHash != "abc" {
 		t.Errorf("expected APIHash=abc, got %q", cfg.APIHash)
 	}
-	if cfg.BotToken != "bot:token" {
-		t.Errorf("expected BotToken=bot:token, got %q", cfg.BotToken)
+	if cfg.SessionString != "session" {
+		t.Errorf("expected SessionString=session, got %q", cfg.SessionString)
 	}
 	if len(cfg.ChatIDs) != 2 || cfg.ChatIDs[0] != "-1001" || cfg.ChatIDs[1] != "-1002" {
 		t.Errorf("unexpected chat IDs: %v", cfg.ChatIDs)
 	}
 
 	pub := svc.PublicConfig()
-	if !pub.HasAPIID || !pub.HasAPIHash || !pub.HasBotToken || !pub.HasSession {
+	if !pub.HasAPIID || !pub.HasAPIHash || !pub.HasSession {
 		t.Errorf("expected all secrets present: %+v", pub)
 	}
 }
@@ -100,7 +111,7 @@ func TestServiceEditConfigValidation(t *testing.T) {
 		t.Error("expected error for missing API ID")
 	}
 
-	_, err = svc.EditConfig(Config{Enabled: true, APIID: 1, APIHash: "hash"})
+	_, err = svc.EditConfig(Config{Enabled: true, APIID: 1, APIHash: "hash", SessionString: ""})
 	if err == nil {
 		t.Error("expected error for missing auth")
 	}
@@ -121,18 +132,18 @@ func TestServiceEditConfigPersists(t *testing.T) {
 	svc := NewService(store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	cfg, err := svc.EditConfig(Config{
-		Enabled:   true,
-		APIID:     123,
-		APIHash:   "hash",
-		BotToken:  "bot:token",
-		StreamURL: "http://localhost/stream",
-		ChatIDs:   []string{"-1001", "-1002"},
+		Enabled:       true,
+		APIID:         123,
+		APIHash:       "hash",
+		SessionString: "sess",
+		StreamURL:     "http://localhost/stream",
+		ChatIDs:       []string{"-1001", "-1002"},
 	})
 	if err != nil {
 		t.Fatalf("EditConfig failed: %v", err)
 	}
 
-	if !cfg.Enabled || !cfg.HasAPIID || !cfg.HasAPIHash || !cfg.HasBotToken || len(cfg.ChatIDs) != 2 {
+	if !cfg.Enabled || !cfg.HasAPIID || !cfg.HasAPIHash || !cfg.HasSession || len(cfg.ChatIDs) != 2 {
 		t.Errorf("unexpected public config: %+v", cfg)
 	}
 
@@ -149,12 +160,12 @@ func TestServiceEditConfigPersists(t *testing.T) {
 
 func TestServiceStartStop(t *testing.T) {
 	store := &fakeStore{props: map[string]string{
-		propEnabled:   "true",
-		propAPIID:     "123",
-		propAPIHash:   "hash",
-		propBotToken:  "bot:token",
-		propStreamURL: "http://localhost/stream",
-		propChatIDs:   "-1001",
+		propEnabled:       "true",
+		propAPIID:         "123",
+		propAPIHash:       "hash",
+		propSessionString: "sess",
+		propStreamURL:     "http://localhost/stream",
+		propChatIDs:       "-1001",
 	}}
 	svc := NewService(store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err := svc.Load(); err != nil {

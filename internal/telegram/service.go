@@ -16,6 +16,10 @@ import (
 	"time"
 )
 
+// ErrPasswordNeeded is returned by SignInUserbot when the account requires
+// a 2FA password to complete sign-in.
+var ErrPasswordNeeded = errors.New("2FA password required")
+
 // StreamRunnerFactory creates a StreamRunner for the given configuration.
 type StreamRunnerFactory func(ctx context.Context, cfg Config, workDir, pythonBin string) (StreamRunner, error)
 
@@ -41,7 +45,6 @@ func defaultRunnerFactory(ctx context.Context, cfg Config, workDir, pythonBin st
 	payload, err := json.Marshal(map[string]any{
 		"api_id":         cfg.APIID,
 		"api_hash":       cfg.APIHash,
-		"bot_token":      cfg.BotToken,
 		"session_string": cfg.SessionString,
 		"stream_url":     cfg.StreamURL,
 		"chat_ids":       cfg.ChatIDs,
@@ -63,12 +66,14 @@ func defaultRunnerFactory(ctx context.Context, cfg Config, workDir, pythonBin st
 
 // Service manages Telegram voice stream configuration and the Python streamer subprocess.
 type Service struct {
-	store     Store
-	logger    *slog.Logger
-	workDir   string
-	pythonBin string
+	store        Store
+	logger       *slog.Logger
+	workDir      string
+	loginWorkDir string
+	pythonBin    string
 
 	mutex         sync.RWMutex
+	loginMutex    sync.Mutex
 	config        Config
 	proc          StreamRunner
 	procCtx       context.Context
@@ -79,10 +84,12 @@ type Service struct {
 
 // NewService creates a new Telegram voice stream service.
 func NewService(store Store, log *slog.Logger) *Service {
+	workDir := filepath.Join("storage", "telegram")
 	return &Service{
 		store:         store,
 		logger:        log.WithGroup("telegram"),
-		workDir:       filepath.Join("storage", "telegram"),
+		workDir:       workDir,
+		loginWorkDir:  filepath.Join(workDir, "login"),
 		pythonBin:     "python3",
 		runnerFactory: defaultRunnerFactory,
 	}
@@ -106,8 +113,6 @@ func (s *Service) Load() error {
 			}
 		case propAPIHash:
 			cfg.APIHash = prop.Value
-		case propBotToken:
-			cfg.BotToken = prop.Value
 		case propSessionString:
 			cfg.SessionString = prop.Value
 		case propStreamURL:
@@ -157,19 +162,32 @@ func (s *Service) PublicConfig() PublicConfig {
 	defer s.mutex.RUnlock()
 
 	return PublicConfig{
-		Enabled:     s.config.Enabled,
-		StreamURL:   s.config.StreamURL,
-		ChatIDs:     append([]string(nil), s.config.ChatIDs...),
-		HasAPIID:    s.config.APIID != 0,
-		HasAPIHash:  s.config.APIHash != "",
-		HasBotToken: s.config.BotToken != "",
-		HasSession:  s.config.SessionString != "",
+		Enabled:    s.config.Enabled,
+		StreamURL:  s.config.StreamURL,
+		ChatIDs:    append([]string(nil), s.config.ChatIDs...),
+		HasAPIID:   s.config.APIID != 0,
+		HasAPIHash: s.config.APIHash != "",
+		HasSession: s.config.SessionString != "",
 	}
 }
 
 // EditConfig validates and saves a new configuration, then restarts the streamer
-// so changes take effect immediately.
+// so changes take effect immediately. Empty secret fields are merged with the
+// currently stored values so callers can send "" for unchanged secrets.
 func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
+	// Merge empty secrets with existing stored values.
+	s.mutex.Lock()
+	if newConfig.APIID == 0 {
+		newConfig.APIID = s.config.APIID
+	}
+	if strings.TrimSpace(newConfig.APIHash) == "" {
+		newConfig.APIHash = s.config.APIHash
+	}
+	if strings.TrimSpace(newConfig.SessionString) == "" {
+		newConfig.SessionString = s.config.SessionString
+	}
+	s.mutex.Unlock()
+
 	if newConfig.Enabled {
 		if newConfig.APIID.Int() == 0 {
 			return PublicConfig{}, errors.New("Telegram API ID is required")
@@ -177,8 +195,8 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 		if strings.TrimSpace(newConfig.APIHash) == "" {
 			return PublicConfig{}, errors.New("Telegram API hash is required")
 		}
-		if strings.TrimSpace(newConfig.SessionString) == "" && strings.TrimSpace(newConfig.BotToken) == "" {
-			return PublicConfig{}, errors.New("either a Telegram session string or a Bot API token is required")
+		if strings.TrimSpace(newConfig.SessionString) == "" {
+			return PublicConfig{}, errors.New("Telegram session string is required; log in via the userbot login flow first")
 		}
 		if len(newConfig.ChatIDs) == 0 {
 			return PublicConfig{}, errors.New("at least one Telegram chat ID is required")
@@ -186,6 +204,13 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 		if strings.TrimSpace(newConfig.StreamURL) == "" {
 			return PublicConfig{}, errors.New("stream URL is required")
 		}
+	}
+
+	if _, err := s.store.UpsertStationProperty(propEnabled, strconv.FormatBool(newConfig.Enabled)); err != nil {
+		return PublicConfig{}, err
+	}
+	if _, err := s.store.UpsertStationProperty(propAPIID, strconv.Itoa(newConfig.APIID.Int())); err != nil {
+		return PublicConfig{}, err
 	}
 
 	cleanedIDs := make([]string, 0, len(newConfig.ChatIDs))
@@ -200,36 +225,13 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 		cleanedIDs = append(cleanedIDs, id)
 	}
 	newConfig.ChatIDs = cleanedIDs
+	newConfig.StreamURL = strings.TrimSpace(newConfig.StreamURL)
 
-	if newConfig.StreamURL != "" {
-		newConfig.StreamURL = strings.TrimSpace(newConfig.StreamURL)
-	}
-
-	enabled := "false"
-	if newConfig.Enabled {
-		enabled = "true"
-	}
-
-	if _, err := s.store.UpsertStationProperty(propEnabled, enabled); err != nil {
+	if _, err := s.store.UpsertStationProperty(propAPIHash, newConfig.APIHash); err != nil {
 		return PublicConfig{}, err
 	}
-	if _, err := s.store.UpsertStationProperty(propAPIID, strconv.Itoa(newConfig.APIID.Int())); err != nil {
+	if _, err := s.store.UpsertStationProperty(propSessionString, newConfig.SessionString); err != nil {
 		return PublicConfig{}, err
-	}
-	if newConfig.APIHash != "" {
-		if _, err := s.store.UpsertStationProperty(propAPIHash, newConfig.APIHash); err != nil {
-			return PublicConfig{}, err
-		}
-	}
-	if newConfig.BotToken != "" {
-		if _, err := s.store.UpsertStationProperty(propBotToken, newConfig.BotToken); err != nil {
-			return PublicConfig{}, err
-		}
-	}
-	if newConfig.SessionString != "" {
-		if _, err := s.store.UpsertStationProperty(propSessionString, newConfig.SessionString); err != nil {
-			return PublicConfig{}, err
-		}
 	}
 	if _, err := s.store.UpsertStationProperty(propStreamURL, newConfig.StreamURL); err != nil {
 		return PublicConfig{}, err
@@ -257,22 +259,29 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 
 // Test validates Telegram credentials by attempting a quick Pyrogram connection.
 // It spawns a short-lived Python one-liner using the configured credentials.
+// Empty fields are merged with the stored configuration so the UI can test
+// credentials without sending the secret values back from the client.
 func (s *Service) Test(cfg Config) error {
+	s.mutex.RLock()
+	if cfg.APIID == 0 {
+		cfg.APIID = s.config.APIID
+	}
+	if strings.TrimSpace(cfg.APIHash) == "" {
+		cfg.APIHash = s.config.APIHash
+	}
+	if strings.TrimSpace(cfg.SessionString) == "" {
+		cfg.SessionString = s.config.SessionString
+	}
+	s.mutex.RUnlock()
+
 	if cfg.APIID.Int() == 0 {
 		return errors.New("Telegram API ID is required")
 	}
 	if strings.TrimSpace(cfg.APIHash) == "" {
 		return errors.New("Telegram API hash is required")
 	}
-	if strings.TrimSpace(cfg.SessionString) == "" && strings.TrimSpace(cfg.BotToken) == "" {
-		return errors.New("either a Telegram session string or a Bot API token is required")
-	}
-
-	authType := "session_string"
-	authValue := cfg.SessionString
 	if strings.TrimSpace(cfg.SessionString) == "" {
-		authType = "bot_token"
-		authValue = cfg.BotToken
+		return errors.New("Telegram session string is required")
 	}
 
 	script := `
@@ -280,19 +289,14 @@ import asyncio, json, sys
 from pyrogram import Client
 
 async def main():
-    kwargs = {
-        "name": "airstation_test",
-        "api_id": int(sys.argv[1]),
-        "api_hash": sys.argv[2],
-        "in_memory": True,
-        "no_updates": True,
-    }
-    if sys.argv[3] == "bot_token":
-        kwargs["bot_token"] = sys.argv[4]
-    else:
-        kwargs["session_string"] = sys.argv[4]
-
-    client = Client(**kwargs)
+    client = Client(
+        name="airstation_test",
+        api_id=int(sys.argv[1]),
+        api_hash=sys.argv[2],
+        session_string=sys.argv[3],
+        in_memory=True,
+        no_updates=True,
+    )
     await client.start()
     me = await client.get_me()
     print(json.dumps({"id": me.id, "username": me.username or "", "first_name": me.first_name or "", "is_bot": me.is_bot}))
@@ -300,7 +304,7 @@ async def main():
 
 asyncio.run(main())
 `
-	cmd := exec.Command(s.pythonBin, "-c", script, strconv.Itoa(cfg.APIID.Int()), cfg.APIHash, authType, authValue)
+	cmd := exec.Command(s.pythonBin, "-c", script, strconv.Itoa(cfg.APIID.Int()), cfg.APIHash, cfg.SessionString)
 	var out bytes.Buffer
 	var errBuf bytes.Buffer
 	cmd.Stdout = &out
@@ -308,6 +312,274 @@ asyncio.run(main())
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("telegram credential test failed: %v: %s", err, errBuf.String())
+	}
+
+	var me struct {
+		IsBot bool `json:"is_bot"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &me); err != nil {
+		return fmt.Errorf("parsing telegram account info: %w", err)
+	}
+	if me.IsBot {
+		return errors.New("bot accounts cannot be used for Telegram voice streaming; use a user account")
+	}
+	return nil
+}
+
+// resolveAPICredentials returns the provided API credentials when they are set,
+// otherwise falling back to the values stored in the service configuration.
+func (s *Service) resolveAPICredentials(apiID int, apiHash string) (int, string, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	if apiID == 0 {
+		apiID = s.config.APIID.Int()
+	}
+	if apiHash == "" {
+		apiHash = s.config.APIHash
+	}
+	if apiID == 0 {
+		return 0, "", errors.New("Telegram API ID is required")
+	}
+	if apiHash == "" {
+		return 0, "", errors.New("Telegram API hash is required")
+	}
+	return apiID, apiHash, nil
+}
+
+func (s *Service) loginScriptCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
+	if err := os.MkdirAll(s.loginWorkDir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating telegram login workdir failed: %w", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("getting working directory failed: %w", err)
+	}
+
+	script := filepath.Join(cwd, "tools", "telegram_login.py")
+	allArgs := append([]string{script}, args...)
+	cmd := exec.CommandContext(ctx, s.pythonBin, allArgs...)
+	cmd.Dir = s.loginWorkDir
+	return cmd, nil
+}
+
+// loadLoginState reads the persisted userbot login state.
+func (s *Service) loadLoginState() (phone, phoneCodeHash, step string, err error) {
+	props, err := s.store.StationProperties()
+	if err != nil {
+		return "", "", "", err
+	}
+	for _, p := range props {
+		switch p.Key {
+		case propLoginPhone:
+			phone = p.Value
+		case propLoginPhoneCodeHash:
+			phoneCodeHash = p.Value
+		case propLoginStep:
+			step = p.Value
+		}
+	}
+	return phone, phoneCodeHash, step, nil
+}
+
+// saveLoginState persists the userbot login state.
+func (s *Service) saveLoginState(phone, phoneCodeHash, step string) error {
+	if _, err := s.store.UpsertStationProperty(propLoginPhone, phone); err != nil {
+		return err
+	}
+	if _, err := s.store.UpsertStationProperty(propLoginPhoneCodeHash, phoneCodeHash); err != nil {
+		return err
+	}
+	if _, err := s.store.UpsertStationProperty(propLoginStep, step); err != nil {
+		return err
+	}
+	return nil
+}
+
+// clearLoginState removes the persisted userbot login state.
+func (s *Service) clearLoginState() error {
+	_ = s.store.DeleteStationProperty(propLoginPhone)
+	_ = s.store.DeleteStationProperty(propLoginPhoneCodeHash)
+	_ = s.store.DeleteStationProperty(propLoginStep)
+	return nil
+}
+
+// SendLoginCode requests a Telegram login code for the given phone number.
+// It returns the phone_code_hash needed for SignInUserbot and persists the
+// login state so the 2FA step can continue later.
+func (s *Service) SendLoginCode(phone string, apiID int, apiHash string) (string, error) {
+	s.loginMutex.Lock()
+	defer s.loginMutex.Unlock()
+
+	phone = strings.TrimSpace(phone)
+	if phone == "" {
+		return "", errors.New("phone number is required")
+	}
+
+	apiID, apiHash, err := s.resolveAPICredentials(apiID, apiHash)
+	if err != nil {
+		return "", err
+	}
+
+	if err := s.clearLoginState(); err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd, err := s.loginScriptCmd(ctx, "send-code", strconv.Itoa(apiID), apiHash, phone)
+	if err != nil {
+		return "", err
+	}
+
+	var out bytes.Buffer
+	var errBuf bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("telegram send-login-code failed: %w: %s", err, errBuf.String())
+	}
+
+	var resp LoginCodeResponse
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		return "", fmt.Errorf("parsing login code response: %w", err)
+	}
+	if resp.PhoneCodeHash == "" {
+		return "", errors.New("login code response did not include phone_code_hash")
+	}
+
+	if err := s.saveLoginState(phone, resp.PhoneCodeHash, "code_sent"); err != nil {
+		return "", err
+	}
+
+	return resp.PhoneCodeHash, nil
+}
+
+// SignInUserbot completes a userbot login with the verification code and optional
+// 2FA password. If the account requires a password, it returns ErrPasswordNeeded
+// and the caller must retry with the password. On success the resulting session
+// string is persisted and the streamer is restarted so the new session takes
+// effect immediately.
+func (s *Service) SignInUserbot(phone, phoneCodeHash, code, password string, apiID int, apiHash string) error {
+	s.loginMutex.Lock()
+	defer s.loginMutex.Unlock()
+
+	apiID, apiHash, err := s.resolveAPICredentials(apiID, apiHash)
+	if err != nil {
+		return err
+	}
+
+	phone = strings.TrimSpace(phone)
+	if phone == "" {
+		return errors.New("phone number is required")
+	}
+	if strings.TrimSpace(phoneCodeHash) == "" {
+		return errors.New("phone code hash is required")
+	}
+	if strings.TrimSpace(code) == "" {
+		return errors.New("login code is required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// If we already know a password is required, finish the login with the
+	// stored session instead of trying to consume the code again.
+	_, storedHash, step, err := s.loadLoginState()
+	if err != nil {
+		return err
+	}
+	awaitingPassword := step == "awaiting_password" && storedHash == phoneCodeHash
+
+	var cmd *exec.Cmd
+	if awaitingPassword && password != "" {
+		cmd, err = s.loginScriptCmd(ctx, "check-password", strconv.Itoa(apiID), apiHash, phone, "--password", password)
+	} else {
+		args := []string{
+			"sign-in",
+			strconv.Itoa(apiID),
+			apiHash,
+			phone,
+			phoneCodeHash,
+			code,
+		}
+		if password != "" {
+			args = append(args, "--password", password)
+		}
+		cmd, err = s.loginScriptCmd(ctx, args...)
+	}
+	if err != nil {
+		return err
+	}
+
+	var out bytes.Buffer
+	var errBuf bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("telegram sign-in failed: %w: %s", err, errBuf.String())
+	}
+
+	var result struct {
+		NeedsPassword bool   `json:"needsPassword"`
+		SessionString string `json:"sessionString"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		return fmt.Errorf("parsing sign-in response: %w", err)
+	}
+
+	if result.NeedsPassword {
+		if err := s.saveLoginState(phone, phoneCodeHash, "awaiting_password"); err != nil {
+			return err
+		}
+		return ErrPasswordNeeded
+	}
+	if result.SessionString == "" {
+		return errors.New("sign-in did not return a session string")
+	}
+
+	if _, err := s.store.UpsertStationProperty(propSessionString, result.SessionString); err != nil {
+		return err
+	}
+
+	s.mutex.Lock()
+	s.config.SessionString = result.SessionString
+	enabled := s.config.Enabled
+	s.mutex.Unlock()
+
+	if err := s.clearLoginState(); err != nil {
+		return err
+	}
+
+	s.logger.Info("Telegram userbot session saved")
+
+	if enabled {
+		if err := s.Restart(); err != nil {
+			s.logger.Warn("Failed to restart Telegram streamer after login", slog.String("error", err.Error()))
+		}
+	}
+
+	return nil
+}
+
+// ClearSession removes the persisted session string and any pending login state,
+// clears them from the in-memory config, and stops the streamer if it is running.
+func (s *Service) ClearSession() error {
+	if err := s.store.DeleteStationProperty(propSessionString); err != nil {
+		return err
+	}
+	_ = s.clearLoginState()
+
+	s.mutex.Lock()
+	s.config.SessionString = ""
+	s.mutex.Unlock()
+
+	if err := s.Stop(); err != nil {
+		s.logger.Warn("Failed to stop Telegram streamer after clearing session", slog.String("error", err.Error()))
 	}
 	return nil
 }
@@ -320,7 +592,7 @@ func (s *Service) Start() error {
 	if !s.config.Enabled {
 		return nil
 	}
-	if s.config.APIID == 0 || s.config.APIHash == "" || (s.config.SessionString == "" && s.config.BotToken == "") || len(s.config.ChatIDs) == 0 {
+	if s.config.APIID == 0 || s.config.APIHash == "" || s.config.SessionString == "" || len(s.config.ChatIDs) == 0 {
 		return errors.New("Telegram voice stream is enabled but not fully configured")
 	}
 	if s.proc != nil && s.proc.Process() != nil {

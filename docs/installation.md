@@ -64,30 +64,32 @@ Set `AIRSTATION_TMP_RETENTION` to another Go duration such as `12h` or `48h` if 
 You can stream the Airstation HLS feed live into one or more Telegram group/channel voice chats. This requires:
 
 - Your `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
-- Either a **Bot API token** from [@BotFather](https://t.me/BotFather) **or** a Pyrogram session string.
-
-A Bot API token can be used directly to create an MTProto bot session. If Telegram does not allow the bot to transmit audio in your target voice chat, switch to a user session string generated with the helper script.
+- A Telegram **user account**. Bot accounts cannot join voice chats, so Bot API tokens are not supported.
 
 Steps:
 
 1. Get your `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
-2. (Optional, if not using a Bot API token) Generate a session string:
-   ```sh
-   docker exec -it <airstation-container> python3 tools/telegram_login.py <api_id> <api_hash>
-   ```
-   Or, if running from source:
-   ```sh
-   python3 tools/telegram_login.py <api_id> <api_hash>
-   ```
-3. In the Studio settings, open **Telegram voice stream**, enable it, and paste:
+2. In the Studio settings, open **Telegram voice stream** and fill in:
    - API ID
    - API hash
-   - Bot API token **or** session string
    - The public Airstation HLS stream URL (e.g. `http://your-host:7331/stream`)
    - Comma-separated Telegram chat IDs (e.g. `-1001234567890`)
-4. Click **Test credentials**, then **Save**. Airstation starts a py-tgcalls subprocess that joins the voice chats and streams the same HLS feed the web player uses.
+3. Click **Login with Telegram**. Enter the phone number (with country code, e.g. `+8613800138000`), request a code, enter the code from Telegram, and provide the 2FA password if the account has two-step verification enabled. Airstation saves the Pyrogram session string automatically.
+4. Click **Save**, then **Test credentials**. Airstation starts a py-tgcalls subprocess that joins the voice chats and streams the same HLS feed the web player uses.
 
-> The Telegram account/bot must already be a member of the target group or channel, and the group/channel must have an active voice/video chat. The configuration is hot-reloaded: saving new settings restarts the streamer without restarting Airstation.
+If you prefer to generate the session string manually, you can still use the helper script:
+
+```sh
+docker exec -it <airstation-container> python3 tools/telegram_login.py <api_id> <api_hash>
+```
+
+Or, if running from source:
+
+```sh
+python3 tools/telegram_login.py <api_id> <api_hash>
+```
+
+> The Telegram user account must already be a member of the target group or channel, and the group/channel must have an active voice/video chat. The configuration is hot-reloaded: saving new settings restarts the streamer without restarting Airstation.
 
 To stop the container, just type:
 

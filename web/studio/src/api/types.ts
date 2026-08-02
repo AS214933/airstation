@@ -59,7 +59,6 @@ export interface TelegramVoiceConfig {
     enabled: boolean;
     apiID: number;
     apiHash: string;
-    botToken: string;
     sessionString: string;
     streamURL: string;
     chatIDs: string[];
@@ -71,6 +70,28 @@ export interface TelegramVoicePublicConfig {
     chatIDs: string[];
     hasAPIID: boolean;
     hasAPIHash: boolean;
-    hasBotToken: boolean;
     hasSession: boolean;
+}
+
+export interface TelegramSendCodeRequest {
+    phone: string;
+    apiID?: number;
+    apiHash?: string;
+}
+
+export interface TelegramSendCodeResponse {
+    phoneCodeHash: string;
+}
+
+export interface TelegramSignInRequest {
+    phone: string;
+    phoneCodeHash: string;
+    code: string;
+    password?: string;
+    apiID?: number;
+    apiHash?: string;
+}
+
+export interface TelegramSignInResponse {
+    needsPassword: boolean;
 }

@@ -2,7 +2,7 @@
 """
 Airstation Telegram voice streamer.
 
-Connects to Telegram as a user or bot via Pyrogram and streams the Airstation
+Connects to Telegram as a user via Pyrogram and streams the Airstation
 HLS playlist into one or more Telegram group/channel voice chats using
 py-tgcalls.
 
@@ -27,7 +27,6 @@ class TelegramStreamer:
     def __init__(self, config: dict):
         self.api_id = int(config["api_id"])
         self.api_hash = config["api_hash"]
-        self.bot_token = config.get("bot_token") or config.get("botToken")
         self.session_string = config.get("session_string") or config.get("sessionString")
         self.chat_ids = [int(c) for c in config.get("chat_ids", [])]
         self.stream_url = config.get("stream_url", "http://localhost:7331/stream")
@@ -50,8 +49,11 @@ class TelegramStreamer:
             logging.error("No Telegram chat IDs configured")
             sys.exit(1)
 
-        if not self.session_string and not self.bot_token:
-            logging.error("Either a Telegram session string or a Bot API token is required")
+        if not self.session_string:
+            logging.error(
+                "A Pyrogram user session string is required. "
+                "Log in through the Studio settings first."
+            )
             sys.exit(1)
 
         logging.info("Starting Telegram voice streamer")
@@ -60,20 +62,15 @@ class TelegramStreamer:
 
         os.makedirs(self.workdir, exist_ok=True)
 
-        client_kwargs = {
-            "name": "airstation_telegram_streamer",
-            "api_id": self.api_id,
-            "api_hash": self.api_hash,
-            "workdir": self.workdir,
-            "in_memory": True,
-            "no_updates": True,
-        }
-        if self.session_string:
-            client_kwargs["session_string"] = self.session_string
-        else:
-            client_kwargs["bot_token"] = self.bot_token
-
-        self.app = Client(**client_kwargs)
+        self.app = Client(
+            name="airstation_telegram_streamer",
+            api_id=self.api_id,
+            api_hash=self.api_hash,
+            session_string=self.session_string,
+            workdir=self.workdir,
+            in_memory=True,
+            no_updates=True,
+        )
         self.call = PyTgCalls(self.app)
 
         await self.call.start()

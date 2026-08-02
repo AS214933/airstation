@@ -2,6 +2,7 @@ package http
 
 import (
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -234,4 +235,62 @@ func (s *Server) handleTestTelegramConfig(w http.ResponseWriter, r *http.Request
 	}
 
 	jsonOK(w, "Telegram credentials are valid.")
+}
+
+func (s *Server) handleTelegramLoginCode(w http.ResponseWriter, r *http.Request) {
+	body, err := parseJSONBody[struct {
+		Phone   string `json:"phone"`
+		APIID   int    `json:"apiID"`
+		APIHash string `json:"apiHash"`
+	}](r)
+	if err != nil {
+		jsonBadRequest(w, "Parsing request body failed: "+err.Error())
+		return
+	}
+
+	phoneCodeHash, err := s.telegramService.SendLoginCode(body.Phone, body.APIID, body.APIHash)
+	if err != nil {
+		jsonBadRequest(w, "Telegram login code request failed: "+err.Error())
+		return
+	}
+
+	jsonResponse(w, telegram.LoginCodeResponse{PhoneCodeHash: phoneCodeHash})
+}
+
+func (s *Server) handleTelegramLoginSignIn(w http.ResponseWriter, r *http.Request) {
+	body, err := parseJSONBody[struct {
+		Phone         string `json:"phone"`
+		PhoneCodeHash string `json:"phoneCodeHash"`
+		Code          string `json:"code"`
+		Password      string `json:"password"`
+		APIID         int    `json:"apiID"`
+		APIHash       string `json:"apiHash"`
+	}](r)
+	if err != nil {
+		jsonBadRequest(w, "Parsing request body failed: "+err.Error())
+		return
+	}
+
+	err = s.telegramService.SignInUserbot(body.Phone, body.PhoneCodeHash, body.Code, body.Password, body.APIID, body.APIHash)
+	if errors.Is(err, telegram.ErrPasswordNeeded) {
+		jsonResponse(w, struct {
+			NeedsPassword bool `json:"needsPassword"`
+		}{NeedsPassword: true})
+		return
+	}
+	if err != nil {
+		jsonBadRequest(w, "Telegram sign-in failed: "+err.Error())
+		return
+	}
+
+	jsonOK(w, "Telegram userbot logged in and session saved.")
+}
+
+func (s *Server) handleTelegramLogout(w http.ResponseWriter, r *http.Request) {
+	if err := s.telegramService.ClearSession(); err != nil {
+		jsonBadRequest(w, "Failed to clear Telegram session: "+err.Error())
+		return
+	}
+
+	jsonOK(w, "Telegram session cleared.")
 }

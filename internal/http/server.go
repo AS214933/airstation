@@ -72,6 +72,9 @@ func (s *Server) Run() {
 	s.router.Handle("GET /api/v1/telegram/config", s.jwtAuth(http.HandlerFunc(s.handleTelegramConfig)))
 	s.router.Handle("PUT /api/v1/telegram/config", s.jwtAuth(http.HandlerFunc(s.handleEditTelegramConfig)))
 	s.router.Handle("POST /api/v1/telegram/test", s.jwtAuth(http.HandlerFunc(s.handleTestTelegramConfig)))
+	s.router.Handle("POST /api/v1/telegram/login/code", s.jwtAuth(http.HandlerFunc(s.handleTelegramLoginCode)))
+	s.router.Handle("POST /api/v1/telegram/login/signin", s.jwtAuth(http.HandlerFunc(s.handleTelegramLoginSignIn)))
+	s.router.Handle("DELETE /api/v1/telegram/session", s.jwtAuth(http.HandlerFunc(s.handleTelegramLogout)))
 
 	s.router.Handle("GET /studio/", s.handleStaticDir("/studio/", s.config.StudioDir))
 	s.router.Handle("GET /", s.handleStaticDir("/", s.config.PlayerDir))

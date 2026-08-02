@@ -11,6 +11,7 @@ import (
 type Store interface {
 	StationProperties() ([]*station.Property, error)
 	UpsertStationProperty(key, value string) (*station.Property, error)
+	DeleteStationProperty(key string) error
 }
 
 // IntString is an integer that can be decoded from either a JSON number or a
@@ -44,13 +45,12 @@ func (i IntString) Int() int {
 }
 
 // Config holds the full Telegram voice stream configuration, including secrets.
-// Authentication can be done either with a Pyrogram session string (user or bot
-// account) or with a Bot API token, which is used to create an MTProto bot session.
+// Voice streaming requires a Pyrogram user session string; bot tokens are not
+// supported because Telegram does not allow bots to join voice chats.
 type Config struct {
 	Enabled       bool      `json:"enabled"`
 	APIID         IntString `json:"apiID"`
 	APIHash       string    `json:"apiHash"`
-	BotToken      string    `json:"botToken"`
 	SessionString string    `json:"sessionString"`
 	StreamURL     string    `json:"streamURL"`
 	ChatIDs       []string  `json:"chatIDs"`
@@ -59,11 +59,15 @@ type Config struct {
 // PublicConfig is the configuration exposed through public API endpoints.
 // Secrets are never returned.
 type PublicConfig struct {
-	Enabled     bool     `json:"enabled"`
-	StreamURL   string   `json:"streamURL"`
-	ChatIDs     []string `json:"chatIDs"`
-	HasAPIID    bool     `json:"hasAPIID"`
-	HasAPIHash  bool     `json:"hasAPIHash"`
-	HasBotToken bool     `json:"hasBotToken"`
-	HasSession  bool     `json:"hasSession"`
+	Enabled    bool     `json:"enabled"`
+	StreamURL  string   `json:"streamURL"`
+	ChatIDs    []string `json:"chatIDs"`
+	HasAPIID   bool     `json:"hasAPIID"`
+	HasAPIHash bool     `json:"hasAPIHash"`
+	HasSession bool     `json:"hasSession"`
+}
+
+// LoginCodeResponse is returned after a verification code has been requested.
+type LoginCodeResponse struct {
+	PhoneCodeHash string `json:"phoneCodeHash"`
 }
