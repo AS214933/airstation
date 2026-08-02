@@ -139,10 +139,10 @@ npm ci --prefix ./web/player
 npm ci --prefix ./web/studio
 ```
 
-If you plan to use Telegram voice streaming, also install Python and py-tgcalls:
+If you plan to use Telegram voice streaming, also install Python and py-tgcalls from GitHub main (the PyPI release has a Pyrogram 2.x compatibility issue):
 
 ```sh
-pip install py-tgcalls==2.3.3 pyrogram
+pip install git+https://github.com/pytgcalls/pytgcalls.git pyrogram
 ```
 
 3. Build web clients

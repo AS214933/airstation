@@ -25,13 +25,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/bin/main ./cmd/ma
 FROM python:3.12-slim
 WORKDIR /app
 
-# Install FFmpeg and clean up apt caches.
+# Install FFmpeg, git (needed to install py-tgcalls from source) and clean up.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends ffmpeg git && \
     rm -rf /var/lib/apt/lists/*
 
-# Install py-tgcalls and Pyrogram for the Telegram voice streamer.
-RUN pip install --no-cache-dir py-tgcalls==2.3.3 pyrogram
+# Install py-tgcalls from GitHub main (fixes Pyrogram 2.x incompatibility
+# such as missing GroupcallForbidden) and Pyrogram.
+RUN pip install --no-cache-dir git+https://github.com/pytgcalls/pytgcalls.git pyrogram
 
 COPY --from=server /app/bin/main .
 COPY --from=player /app/dist ./web/player/dist
