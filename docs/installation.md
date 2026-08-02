@@ -63,14 +63,15 @@ Set `AIRSTATION_TMP_RETENTION` to another Go duration such as `12h` or `48h` if 
 
 You can stream the Airstation HLS feed live into one or more Telegram group/channel voice chats. This requires:
 
-- A Telegram **user account** (bots cannot stream audio into voice chats).
 - Your `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
-- A Pyrogram session string, generated once with the helper script.
+- Either a **Bot API token** from [@BotFather](https://t.me/BotFather) **or** a Pyrogram session string.
+
+A Bot API token can be used directly to create an MTProto bot session. If Telegram does not allow the bot to transmit audio in your target voice chat, switch to a user session string generated with the helper script.
 
 Steps:
 
 1. Get your `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
-2. Generate a session string:
+2. (Optional, if not using a Bot API token) Generate a session string:
    ```sh
    docker exec -it <airstation-container> python3 tools/telegram_login.py <api_id> <api_hash>
    ```
@@ -81,12 +82,12 @@ Steps:
 3. In the Studio settings, open **Telegram voice stream**, enable it, and paste:
    - API ID
    - API hash
-   - Session string
+   - Bot API token **or** session string
    - The public Airstation HLS stream URL (e.g. `http://your-host:7331/stream`)
    - Comma-separated Telegram chat IDs (e.g. `-1001234567890`)
 4. Click **Test credentials**, then **Save**. Airstation starts a py-tgcalls subprocess that joins the voice chats and streams the same HLS feed the web player uses.
 
-> The Telegram user account must already be a member of the target group or channel, and the group/channel must have an active voice/video chat. The configuration is hot-reloaded: saving new settings restarts the streamer without restarting Airstation.
+> The Telegram account/bot must already be a member of the target group or channel, and the group/channel must have an active voice/video chat. The configuration is hot-reloaded: saving new settings restarts the streamer without restarting Airstation.
 
 To stop the container, just type:
 

@@ -16,7 +16,7 @@
 </p>
 <br />
 
-Airstation is a self-hosted web app for streaming a NetEase Cloud Music playlist over the Internet. The studio lets you paste a NetEase playlist link, choose the requested audio quality, and provide an optional login cookie for account-only content. The backend randomly pulls playable songs from that playlist, transcodes them with FFmpeg, and publishes one continuous HLS stream for listeners, and can optionally forward that same feed live into Telegram group or channel voice chats. The listener page also shows Apple Music-like lyrics, preferring NetEase word-by-word lyrics and falling back to synced scrolling lines or plain lyric text.
+Airstation is a self-hosted web app for streaming a NetEase Cloud Music playlist over the Internet. The studio lets you paste a NetEase playlist link, choose the requested audio quality, and provide an optional login cookie for account-only content. The backend randomly pulls playable songs from that playlist, transcodes them with FFmpeg, and publishes one continuous HLS stream for listeners, and can optionally forward that same feed live into Telegram group or channel voice chats via a bot token or user session. The listener page also shows Apple Music-like lyrics, preferring NetEase word-by-word lyrics and falling back to synced scrolling lines or plain lyric text.
 
 <img src="./docs/images/screenshot01.png" alt="Web studio screenshot"/>
 <img src="./docs/images/screenshot02.png" alt="Web studio mobile screenshot"/>

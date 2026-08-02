@@ -59,6 +59,7 @@ export interface TelegramVoiceConfig {
     enabled: boolean;
     apiID: number;
     apiHash: string;
+    botToken: string;
     sessionString: string;
     streamURL: string;
     chatIDs: string[];
@@ -70,5 +71,6 @@ export interface TelegramVoicePublicConfig {
     chatIDs: string[];
     hasAPIID: boolean;
     hasAPIHash: boolean;
+    hasBotToken: boolean;
     hasSession: boolean;
 }

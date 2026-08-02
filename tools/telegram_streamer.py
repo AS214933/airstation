@@ -2,8 +2,9 @@
 """
 Airstation Telegram voice streamer.
 
-Connects to Telegram as a user via Pyrogram and streams the Airstation HLS
-playlist into one or more Telegram group/channel voice chats using py-tgcalls.
+Connects to Telegram as a user or bot via Pyrogram and streams the Airstation
+HLS playlist into one or more Telegram group/channel voice chats using
+py-tgcalls.
 
 Configuration is read from stdin as a single line of JSON, then the process
 blocks until interrupted. Logs are written to stderr.
@@ -26,7 +27,8 @@ class TelegramStreamer:
     def __init__(self, config: dict):
         self.api_id = int(config["api_id"])
         self.api_hash = config["api_hash"]
-        self.session_string = config.get("session_string") or config.get("session")
+        self.bot_token = config.get("bot_token") or config.get("botToken")
+        self.session_string = config.get("session_string") or config.get("sessionString")
         self.chat_ids = [int(c) for c in config.get("chat_ids", [])]
         self.stream_url = config.get("stream_url", "http://localhost:7331/stream")
         self.log_level = config.get("log_level", "INFO").upper()
@@ -48,21 +50,30 @@ class TelegramStreamer:
             logging.error("No Telegram chat IDs configured")
             sys.exit(1)
 
+        if not self.session_string and not self.bot_token:
+            logging.error("Either a Telegram session string or a Bot API token is required")
+            sys.exit(1)
+
         logging.info("Starting Telegram voice streamer")
         logging.info("Target chats: %s", self.chat_ids)
         logging.info("Stream URL: %s", self.stream_url)
 
         os.makedirs(self.workdir, exist_ok=True)
 
-        self.app = Client(
-            name="airstation_telegram_streamer",
-            api_id=self.api_id,
-            api_hash=self.api_hash,
-            session_string=self.session_string,
-            workdir=self.workdir,
-            in_memory=True,
-            no_updates=True,
-        )
+        client_kwargs = {
+            "name": "airstation_telegram_streamer",
+            "api_id": self.api_id,
+            "api_hash": self.api_hash,
+            "workdir": self.workdir,
+            "in_memory": True,
+            "no_updates": True,
+        }
+        if self.session_string:
+            client_kwargs["session_string"] = self.session_string
+        else:
+            client_kwargs["bot_token"] = self.bot_token
+
+        self.app = Client(**client_kwargs)
         self.call = PyTgCalls(self.app)
 
         await self.call.start()

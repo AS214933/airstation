@@ -16,11 +16,11 @@ import (
 	"time"
 )
 
-// StreamRunner abstracts spawning the external Python streamer process.
-// It is satisfied by *exec.Cmd in production and can be stubbed in tests.
 // StreamRunnerFactory creates a StreamRunner for the given configuration.
 type StreamRunnerFactory func(ctx context.Context, cfg Config, workDir, pythonBin string) (StreamRunner, error)
 
+// StreamRunner abstracts spawning the external Python streamer process.
+// It is satisfied by *exec.Cmd in production and can be stubbed in tests.
 type StreamRunner interface {
 	Start() error
 	Wait() error
@@ -41,6 +41,7 @@ func defaultRunnerFactory(ctx context.Context, cfg Config, workDir, pythonBin st
 	payload, err := json.Marshal(map[string]any{
 		"api_id":         cfg.APIID,
 		"api_hash":       cfg.APIHash,
+		"bot_token":      cfg.BotToken,
 		"session_string": cfg.SessionString,
 		"stream_url":     cfg.StreamURL,
 		"chat_ids":       cfg.ChatIDs,
@@ -105,6 +106,8 @@ func (s *Service) Load() error {
 			}
 		case propAPIHash:
 			cfg.APIHash = prop.Value
+		case propBotToken:
+			cfg.BotToken = prop.Value
 		case propSessionString:
 			cfg.SessionString = prop.Value
 		case propStreamURL:
@@ -148,17 +151,19 @@ func (s *Service) Config() Config {
 }
 
 // PublicConfig returns a sanitized configuration for public API responses.
+// Secrets are never returned.
 func (s *Service) PublicConfig() PublicConfig {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
 	return PublicConfig{
-		Enabled:    s.config.Enabled,
-		StreamURL:  s.config.StreamURL,
-		ChatIDs:    append([]string(nil), s.config.ChatIDs...),
-		HasAPIID:   s.config.APIID != 0,
-		HasAPIHash: s.config.APIHash != "",
-		HasSession: s.config.SessionString != "",
+		Enabled:     s.config.Enabled,
+		StreamURL:   s.config.StreamURL,
+		ChatIDs:     append([]string(nil), s.config.ChatIDs...),
+		HasAPIID:    s.config.APIID != 0,
+		HasAPIHash:  s.config.APIHash != "",
+		HasBotToken: s.config.BotToken != "",
+		HasSession:  s.config.SessionString != "",
 	}
 }
 
@@ -172,8 +177,8 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 		if strings.TrimSpace(newConfig.APIHash) == "" {
 			return PublicConfig{}, errors.New("Telegram API hash is required")
 		}
-		if strings.TrimSpace(newConfig.SessionString) == "" {
-			return PublicConfig{}, errors.New("Telegram session string is required; run tools/telegram_login.py to generate one")
+		if strings.TrimSpace(newConfig.SessionString) == "" && strings.TrimSpace(newConfig.BotToken) == "" {
+			return PublicConfig{}, errors.New("either a Telegram session string or a Bot API token is required")
 		}
 		if len(newConfig.ChatIDs) == 0 {
 			return PublicConfig{}, errors.New("at least one Telegram chat ID is required")
@@ -216,6 +221,11 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 			return PublicConfig{}, err
 		}
 	}
+	if newConfig.BotToken != "" {
+		if _, err := s.store.UpsertStationProperty(propBotToken, newConfig.BotToken); err != nil {
+			return PublicConfig{}, err
+		}
+	}
 	if newConfig.SessionString != "" {
 		if _, err := s.store.UpsertStationProperty(propSessionString, newConfig.SessionString); err != nil {
 			return PublicConfig{}, err
@@ -254,8 +264,15 @@ func (s *Service) Test(cfg Config) error {
 	if strings.TrimSpace(cfg.APIHash) == "" {
 		return errors.New("Telegram API hash is required")
 	}
+	if strings.TrimSpace(cfg.SessionString) == "" && strings.TrimSpace(cfg.BotToken) == "" {
+		return errors.New("either a Telegram session string or a Bot API token is required")
+	}
+
+	authType := "session_string"
+	authValue := cfg.SessionString
 	if strings.TrimSpace(cfg.SessionString) == "" {
-		return errors.New("Telegram session string is required")
+		authType = "bot_token"
+		authValue = cfg.BotToken
 	}
 
 	script := `
@@ -263,22 +280,27 @@ import asyncio, json, sys
 from pyrogram import Client
 
 async def main():
-    client = Client(
-        name="airstation_test",
-        api_id=int(sys.argv[1]),
-        api_hash=sys.argv[2],
-        session_string=sys.argv[3],
-        in_memory=True,
-        no_updates=True,
-    )
+    kwargs = {
+        "name": "airstation_test",
+        "api_id": int(sys.argv[1]),
+        "api_hash": sys.argv[2],
+        "in_memory": True,
+        "no_updates": True,
+    }
+    if sys.argv[3] == "bot_token":
+        kwargs["bot_token"] = sys.argv[4]
+    else:
+        kwargs["session_string"] = sys.argv[4]
+
+    client = Client(**kwargs)
     await client.connect()
     me = await client.get_me()
-    print(json.dumps({"id": me.id, "username": me.username or "", "first_name": me.first_name or ""}))
+    print(json.dumps({"id": me.id, "username": me.username or "", "first_name": me.first_name or "", "is_bot": me.is_bot}))
     await client.disconnect()
 
 asyncio.run(main())
 `
-	cmd := exec.Command(s.pythonBin, "-c", script, strconv.Itoa(cfg.APIID), cfg.APIHash, cfg.SessionString)
+	cmd := exec.Command(s.pythonBin, "-c", script, strconv.Itoa(cfg.APIID), cfg.APIHash, authType, authValue)
 	var out bytes.Buffer
 	var errBuf bytes.Buffer
 	cmd.Stdout = &out
@@ -298,7 +320,7 @@ func (s *Service) Start() error {
 	if !s.config.Enabled {
 		return nil
 	}
-	if s.config.APIID == 0 || s.config.APIHash == "" || s.config.SessionString == "" || len(s.config.ChatIDs) == 0 {
+	if s.config.APIID == 0 || s.config.APIHash == "" || (s.config.SessionString == "" && s.config.BotToken == "") || len(s.config.ChatIDs) == 0 {
 		return errors.New("Telegram voice stream is enabled but not fully configured")
 	}
 	if s.proc != nil && s.proc.Process() != nil {
