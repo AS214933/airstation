@@ -139,11 +139,13 @@ npm ci --prefix ./web/player
 npm ci --prefix ./web/studio
 ```
 
-If you plan to use Telegram voice streaming, also install Python and py-tgcalls from GitHub main (the PyPI release has a Pyrogram 2.x compatibility issue):
+If you plan to use Telegram voice streaming, also install Python and the required packages:
 
 ```sh
-pip install git+https://github.com/pytgcalls/pytgcalls.git pyrogram
+pip install py-tgcalls==2.3.3 pyrogrammod==2.4.1
 ```
+
+> py-tgcalls 2.3.3 is tested against the `pyrogrammod` fork, not the official `pyrogram` package. Official Pyrogram 2.x is missing symbols such as `GroupcallForbidden`, `GroupcallInvalid` and `InputGroupCallSlug`, which will cause import errors. The Docker image installs `pyrogrammod` automatically.
 
 3. Build web clients
 

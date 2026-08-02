@@ -25,14 +25,16 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w
 FROM python:3.12-slim
 WORKDIR /app
 
-# Install FFmpeg, git (needed to install py-tgcalls from source) and clean up.
+# Install FFmpeg and clean up apt caches.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg git && \
+    apt-get install -y --no-install-recommends ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
-# Install py-tgcalls from GitHub main (fixes Pyrogram 2.x incompatibility
-# such as missing GroupcallForbidden) and Pyrogram.
-RUN pip install --no-cache-dir git+https://github.com/pytgcalls/pytgcalls.git pyrogram
+# Install py-tgcalls and pyrogrammod (a Pyrogram fork that py-tgcalls 2.3.3
+# is actually tested against; official Pyrogram 2.x is missing symbols such as
+# GroupcallForbidden/GroupcallInvalid/InputGroupCallSlug).
+RUN pip install --no-cache-dir py-tgcalls==2.3.3 pyrogrammod==2.4.1 && \
+    python3 -c "from pyrogram import Client; from pytgcalls import PyTgCalls; PyTgCalls(Client('x', api_id=1, api_hash='x', in_memory=True, no_updates=True)); print('py-tgcalls ok')"
 
 COPY --from=server /app/bin/main .
 COPY --from=player /app/dist ./web/player/dist
