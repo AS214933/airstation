@@ -7,12 +7,6 @@ import (
 	"github.com/cheatsnake/airstation/internal/station"
 )
 
-// AudioSource provides the current audio source URL for the Telegram voice
-// streamer. It is implemented by the playback state.
-type AudioSource interface {
-	CurrentSourceURL() string
-}
-
 // Store provides access to persisted station properties.
 type Store interface {
 	StationProperties() ([]*station.Property, error)

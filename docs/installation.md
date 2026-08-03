@@ -62,7 +62,7 @@ Logs are `Info` level by default. Set `AIRSTATION_DEBUG=true` temporarily to inc
 
 ### Telegram voice stream (optional)
 
-You can stream the current Airstation playback into one or more Telegram group/channel voice chats. Airstation reads the active source directly and transcodes it for Telegram; no public HLS URL is required. This requires:
+You can stream the current Airstation playback into one or more Telegram group/channel voice chats. Airstation reads its own local HLS playlist and transcodes it for Telegram, so Telegram does not make a second request to the NetEase audio CDN. No public HLS URL is required. This requires:
 
 - Your `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
 - A Telegram **user account**. Bot accounts cannot join voice chats, so Bot API tokens are not supported.

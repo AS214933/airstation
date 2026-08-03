@@ -187,7 +187,6 @@ func TestState_LoadNextTrackUsesPreloadedSegmentsAndMetadata(t *testing.T) {
 	following := stateTrack(3, "Three", "Artist C", "following-seg-", 10)
 	state.CurrentTrack = current.track
 	state.CurrentNetEaseID = current.songID
-	state.currentSourceURL = current.url
 	state.nextPrepared = next
 	state.followingPrepared = following
 	state.CurrentTrackElapsed = current.track.Duration
@@ -287,7 +286,6 @@ func TestState_PreloadRetriesUntilTemporaryFailureRecovers(t *testing.T) {
 	next := stateTrack(2, "Two", "Artist B", "next-seg-", 10)
 	state.CurrentTrack = current.track
 	state.CurrentNetEaseID = current.songID
-	state.currentSourceURL = current.url
 	state.nextPrepared = next
 	state.IsPlaying = true
 	state.playlist = hls.NewPlaylist(current.segments, next.segments)
@@ -365,7 +363,6 @@ func TestState_MissingNextAtBoundaryKeepsPlayingUntilPrepared(t *testing.T) {
 	current := stateTrack(1, "One", "Artist A", "current-seg-", 10)
 	state.CurrentTrack = current.track
 	state.CurrentNetEaseID = current.songID
-	state.currentSourceURL = current.url
 	state.CurrentTrackElapsed = current.track.Duration - state.refreshInterval
 	state.IsPlaying = true
 	state.playlist = hls.NewPlaylist(current.segments, nil)
@@ -503,7 +500,6 @@ func TestState_StalePreloadDoesNotClearCurrentGeneration(t *testing.T) {
 	next := stateTrack(2, "Two", "Artist B", "next-seg-", 10)
 	state.CurrentTrack = current.track
 	state.CurrentNetEaseID = current.songID
-	state.currentSourceURL = current.url
 	state.nextPrepared = next
 	state.IsPlaying = true
 	state.playlist = hls.NewPlaylist(current.segments, next.segments)
@@ -529,7 +525,6 @@ func TestState_StalePreloadDoesNotClearCurrentGeneration(t *testing.T) {
 	state.pauseLocked()
 	state.CurrentTrack = current.track
 	state.CurrentNetEaseID = current.songID
-	state.currentSourceURL = current.url
 	state.nextPrepared = next
 	state.IsPlaying = true
 	state.playlist = hls.NewPlaylist(current.segments, next.segments)

@@ -31,7 +31,7 @@ type Service struct {
 
 	mutex        sync.RWMutex
 	config       Config
-	audioSource  AudioSource
+	hlsURL       string
 	streamCtx    context.Context
 	streamCancel context.CancelFunc
 	streamWg     sync.WaitGroup
@@ -45,24 +45,12 @@ func NewService(store Store, log *slog.Logger) *Service {
 	}
 }
 
-// SetAudioSource wires the voice streamer to the current playback source so
-// it streams the active track directly instead of relying on a generic HLS
-// playlist. This mirrors how music bots feed a single source to the call engine.
-func (s *Service) SetAudioSource(src AudioSource) {
+// SetHLSURL sets the internal HLS playlist consumed by Telegram. The URL is
+// supplied by the HTTP server and is never user-configurable.
+func (s *Service) SetHLSURL(url string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	s.audioSource = src
-}
-
-// currentSourceURL returns the URL of the audio currently being played by the
-// local Airstation playback state, or an empty string if playback is stopped.
-func (s *Service) currentSourceURL() string {
-	s.mutex.RLock()
-	defer s.mutex.RUnlock()
-	if s.audioSource == nil {
-		return ""
-	}
-	return s.audioSource.CurrentSourceURL()
+	s.hlsURL = strings.TrimSpace(url)
 }
 
 // Load reads Telegram voice stream configuration from persistent storage.
@@ -526,6 +514,9 @@ func (s *Service) Start() error {
 	if s.config.APIID == 0 || s.config.APIHash == "" || s.config.SessionString == "" || len(s.config.ChatIDs) == 0 {
 		return errors.New("Telegram voice stream is enabled but not fully configured")
 	}
+	if s.hlsURL == "" {
+		return errors.New("Telegram voice stream has no internal HLS source")
+	}
 	if s.streamCtx != nil {
 		return nil
 	}
@@ -571,9 +562,7 @@ func (s *Service) streamLoop(ctx context.Context) {
 	apiID := s.config.APIID.Int()
 	apiHash := s.config.APIHash
 	chatIDs := append([]string(nil), s.config.ChatIDs...)
-	// Stream the current Airstation track directly. This matches how music
-	// bots feed a single source URL to the voice-call engine.
-	getSourceURL := func() string { return s.currentSourceURL() }
+	hlsURL := s.hlsURL
 	s.mutex.RUnlock()
 
 	sessionStore := &persistedSessionStorage{s: s}
@@ -612,7 +601,7 @@ func (s *Service) streamLoop(ctx context.Context) {
 			wg.Add(1)
 			go func(chatID int64) {
 				defer wg.Done()
-				s.streamChat(ctx, client.API(), joinAs, peers, chatID, getSourceURL)
+				s.streamChat(ctx, client.API(), joinAs, peers, chatID, hlsURL)
 			}(id)
 		}
 		wg.Wait()
@@ -636,7 +625,7 @@ func (s *Service) streamLoop(ctx context.Context) {
 	}
 }
 
-func (s *Service) streamChat(ctx context.Context, api *tg.Client, joinAs *tg.InputPeerUser, peers map[int64]tg.InputPeerClass, chatID int64, getSourceURL func() string) {
+func (s *Service) streamChat(ctx context.Context, api *tg.Client, joinAs *tg.InputPeerUser, peers map[int64]tg.InputPeerClass, chatID int64, hlsURL string) {
 	log := s.logger.With(slog.Int64("chat", chatID))
 	media, err := gotgcall.New(
 		gotgcall.WithLogger(log),
@@ -745,7 +734,7 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, joinAs *tg.Inp
 		}
 		s.logVoiceChatParticipant(ctx, api, call, joinAs, source, log)
 
-		streamErr := streamGroupAudio(ctx, log, media, chatID, getSourceURL)
+		streamErr := streamGroupAudio(ctx, log, media, chatID, hlsURL)
 		if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
 			log.Warn("Audio stream ended", slog.String("error", streamErr.Error()))
 		}
@@ -1049,11 +1038,14 @@ func topMessageDate(messages []tg.MessageClass, topMsgID int) (int, int) {
 	return 0, 0
 }
 
-// streamGroupAudio keeps the call connected while playback starts, pauses,
-// changes tracks, or an input reaches EOF. gotgcall owns Opus packetisation,
-// RTP extensions, pacing, and SRTP encryption; this layer only mirrors the
-// Airstation playback source into that transport.
-func streamGroupAudio(ctx context.Context, log *slog.Logger, media *gotgcall.Client, chatID int64, getURL func() string) error {
+// streamGroupAudio relays the local HLS playlist into the Telegram call.
+// gotgcall owns Opus packetisation, RTP extensions, pacing, and SRTP
+// encryption; Airstation only restarts the HLS reader if it ends unexpectedly.
+func streamGroupAudio(ctx context.Context, log *slog.Logger, media *gotgcall.Client, chatID int64, hlsURL string) error {
+	if hlsURL == "" {
+		return errors.New("internal HLS URL is empty")
+	}
+
 	streamEnded := make(chan struct{}, 1)
 	media.OnStreamEnd(func(endedChatID int64, streamType gotgcall.StreamType, _ gotgcall.Device, err error) {
 		if endedChatID != chatID || streamType != gotgcall.Audio {
@@ -1068,46 +1060,22 @@ func streamGroupAudio(ctx context.Context, log *slog.Logger, media *gotgcall.Cli
 		}
 	})
 
-	var activeURL string
-	paused := false
 	for {
-		url := getURL()
-		if url == "" {
-			if activeURL != "" && !paused {
-				if _, err := media.Pause(chatID); err != nil {
-					return fmt.Errorf("pause audio stream: %w", err)
-				}
-				paused = true
-				log.Info("audio source paused")
-			}
-		} else if url != activeURL {
-			if err := media.SetStreamSources(chatID, gotgcall.FromURL(url, gotgcall.EncodeOptions{})); err != nil {
-				return fmt.Errorf("start audio stream: %w", err)
-			}
-			activeURL = url
-			log.Info("streaming audio source")
-			if paused {
-				if _, err := media.Resume(chatID); err != nil {
-					return fmt.Errorf("resume audio stream: %w", err)
-				}
-				paused = false
-			}
-		} else if paused {
-			if _, err := media.Resume(chatID); err != nil {
-				return fmt.Errorf("resume audio stream: %w", err)
-			}
-			paused = false
-			log.Info("audio source resumed")
+		if err := media.SetStreamSources(chatID, gotgcall.FromURL(hlsURL, gotgcall.EncodeOptions{})); err != nil {
+			return fmt.Errorf("start HLS audio stream: %w", err)
 		}
+		log.Info("streaming local HLS audio source")
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-streamEnded:
-			if !paused {
-				activeURL = ""
+			log.Warn("local HLS audio source ended; restarting")
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
 			}
-		case <-time.After(time.Second):
 		}
 	}
 }

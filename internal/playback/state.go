@@ -49,7 +49,6 @@ type State struct {
 	refreshCount    int64   // Number of state refresh cycles completed
 	refreshInterval float64 // Time interval (in seconds) between state updates
 
-	currentSourceURL  string
 	nextPrepared      *preparedTrack
 	followingPrepared *preparedTrack
 	preloadInFlight   bool
@@ -176,7 +175,6 @@ func (s *State) Play() error {
 	s.preloadGeneration++
 	s.CurrentTrack = current.track
 	s.CurrentNetEaseID = current.songID
-	s.currentSourceURL = current.url
 	s.nextPrepared = next
 	s.followingPrepared = nil
 	s.preloadInFlight = false
@@ -207,7 +205,6 @@ func (s *State) Pause() {
 func (s *State) pauseLocked() {
 	s.CurrentTrack = nil
 	s.CurrentNetEaseID = 0
-	s.currentSourceURL = ""
 	s.nextPrepared = nil
 	s.followingPrepared = nil
 	s.preloadInFlight = false
@@ -246,7 +243,6 @@ func (s *State) loadNextTrackLocked() (string, int64, error) {
 	current := s.nextPrepared
 	s.CurrentTrack = current.track
 	s.CurrentNetEaseID = current.songID
-	s.currentSourceURL = current.url
 	s.nextPrepared = s.followingPrepared
 	s.followingPrepared = nil
 	var nextSegments []*hls.Segment
@@ -415,14 +411,6 @@ func (s *State) makeHLSSegments(source *netease.PlayableTrack, dir string) ([]*h
 	)
 
 	return segments, nil
-}
-
-// CurrentSourceURL returns the URL of the audio file currently being played,
-// or an empty string if playback is stopped.
-func (s *State) CurrentSourceURL() string {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	return s.currentSourceURL
 }
 
 func (s *State) Snapshot() PublicState {

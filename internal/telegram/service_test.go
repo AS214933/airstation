@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/annihilatorrrr/gotgcall"
@@ -147,6 +148,31 @@ func TestServiceStopNoProcess(t *testing.T) {
 	svc := NewService(store, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err := svc.Stop(); err != nil {
 		t.Fatalf("Stop with no process should not error: %v", err)
+	}
+}
+
+func TestServiceStartRequiresInternalHLSURL(t *testing.T) {
+	svc := NewService(&fakeStore{props: make(map[string]string)}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	svc.config = Config{
+		Enabled:       true,
+		APIID:         1,
+		APIHash:       "hash",
+		SessionString: "session",
+		ChatIDs:       []string{"-1001"},
+	}
+
+	err := svc.Start()
+	if err == nil || !strings.Contains(err.Error(), "internal HLS source") {
+		t.Fatalf("Start error = %v, want missing internal HLS source", err)
+	}
+}
+
+func TestServiceSetHLSURLTrimsWhitespace(t *testing.T) {
+	svc := NewService(&fakeStore{props: make(map[string]string)}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	svc.SetHLSURL("  http://127.0.0.1:7331/stream.m3u8  ")
+
+	if svc.hlsURL != "http://127.0.0.1:7331/stream.m3u8" {
+		t.Fatalf("hlsURL = %q", svc.hlsURL)
 	}
 }
 
