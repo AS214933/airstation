@@ -19,7 +19,14 @@ func (s *Server) handleHLSPlaylist(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 
-	fmt.Fprint(w, s.playbackState.Playlist())
+	pl := s.playbackState.Playlist()
+	if pl == "" {
+		s.logger.Warn("HLS playlist is empty", slog.String("url", r.URL.String()), slog.Bool("isPlaying", s.playbackState.Snapshot().IsPlaying))
+	} else {
+		s.logger.Debug("HLS playlist served", slog.String("url", r.URL.String()), slog.Int("length", len(pl)))
+	}
+
+	fmt.Fprint(w, pl)
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
