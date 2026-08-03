@@ -49,6 +49,18 @@ func NewService(store Store, log *slog.Logger) *Service {
 	}
 }
 
+// localStreamURL returns the URL of the local Airstation HLS playlist. The
+// Telegram voice streamer always consumes this URL so it does not require
+// external network access. It respects the AIRSTATION_HTTP_PORT environment
+// variable, defaulting to 7331.
+func localStreamURL() string {
+	port := os.Getenv("AIRSTATION_HTTP_PORT")
+	if port == "" {
+		port = "7331"
+	}
+	return "http://localhost:" + port + "/stream"
+}
+
 // Load reads Telegram voice stream configuration from persistent storage.
 func (s *Service) Load() error {
 	props, err := s.store.StationProperties()
@@ -155,9 +167,6 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 		if len(newConfig.ChatIDs) == 0 {
 			return PublicConfig{}, errors.New("at least one Telegram chat ID is required")
 		}
-		if strings.TrimSpace(newConfig.StreamURL) == "" {
-			return PublicConfig{}, errors.New("stream URL is required")
-		}
 	}
 
 	cleanedIDs := make([]string, 0, len(newConfig.ChatIDs))
@@ -172,7 +181,9 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 		cleanedIDs = append(cleanedIDs, id)
 	}
 	newConfig.ChatIDs = cleanedIDs
-	newConfig.StreamURL = strings.TrimSpace(newConfig.StreamURL)
+	// Stream URL is ignored; the streamer always uses the local Airstation HLS
+	// playlist. Keep the field empty in storage for clarity.
+	newConfig.StreamURL = ""
 
 	if _, err := s.store.UpsertStationProperty(propEnabled, strconv.FormatBool(newConfig.Enabled)); err != nil {
 		return PublicConfig{}, err
@@ -559,7 +570,9 @@ func (s *Service) streamLoop(ctx context.Context) {
 	apiID := s.config.APIID.Int()
 	apiHash := s.config.APIHash
 	chatIDs := append([]string(nil), s.config.ChatIDs...)
-	streamURL := s.config.StreamURL
+	// Always stream the local Airstation HLS playlist; ignore any configured
+	// external stream URL so no outbound network access is required.
+	streamURL := localStreamURL()
 	s.mutex.RUnlock()
 
 	sessionStore := &persistedSessionStorage{s: s}

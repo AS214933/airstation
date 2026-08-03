@@ -278,7 +278,6 @@ const TelegramVoiceSetup: FC<{
                 apiID: 0,
                 apiHash: "",
                 sessionString: "",
-                streamURL: next.streamURL || `${window.location.origin}/stream`,
                 chatIDs: next.chatIDs || [],
             });
         } catch (error) {
@@ -418,14 +417,6 @@ const TelegramVoiceSetup: FC<{
                 placeholder={config?.hasAPIHash ? "Saved. Leave empty to keep it." : "Paste API hash"}
                 disabled={loading}
                 {...form.getInputProps("apiHash")}
-            />
-
-            <TextInput
-                label="Airstation stream URL"
-                placeholder="http://localhost:7331/stream"
-                description="The public HLS playlist URL that py-tgcalls will consume."
-                disabled={loading}
-                {...form.getInputProps("streamURL")}
             />
 
             <Textarea

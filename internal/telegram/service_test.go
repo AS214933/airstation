@@ -99,9 +99,10 @@ func TestServiceEditConfigValidation(t *testing.T) {
 		t.Error("expected error for invalid chat ID")
 	}
 
-	_, err = svc.EditConfig(Config{Enabled: true, APIID: 1, APIHash: "hash", SessionString: "sess", ChatIDs: []string{"abc"}, StreamURL: ""})
-	if err == nil {
-		t.Error("expected error for empty stream URL")
+	// Empty stream URL is allowed; it falls back to the local playlist.
+	_, err = svc.EditConfig(Config{Enabled: true, APIID: 1, APIHash: "hash", SessionString: "sess", ChatIDs: []string{"-1001"}, StreamURL: ""})
+	if err != nil {
+		t.Errorf("unexpected error for empty stream URL: %v", err)
 	}
 }
 
