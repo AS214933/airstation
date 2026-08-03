@@ -662,6 +662,25 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.
 		gc.OnDisconnected(func() {
 			s.logger.Info("Left voice chat", slog.Int64("chat", chatID))
 		})
+		gc.OnParticipants(func(participants []tg.GroupCallParticipant) {
+			for _, p := range participants {
+				if user, ok := p.Peer.(*tg.PeerUser); ok && user.UserID == joinAs.UserID {
+					attrs := []slog.Attr{
+						slog.Int64("user", user.UserID),
+						slog.Bool("muted", p.Muted),
+						slog.Bool("speaking", p.Speaking),
+						slog.Int("volume", p.Volume),
+						slog.Bool("canSelfUnmute", p.CanSelfUnmute),
+					}
+					if p.Muted || p.Volume == 0 {
+						s.logger.Warn("self participant is muted or silent", attrs...)
+					} else {
+						s.logger.LogAttrs(ctx, slog.LevelDebug, "self participant update", attrs...)
+					}
+					break
+				}
+			}
+		})
 
 		if err := gc.Join(ctx, call, joinAs); err != nil {
 			s.logger.Warn("Failed to join voice chat", slog.Int64("chat", chatID), slog.String("error", err.Error()))
