@@ -900,19 +900,37 @@ func topMessageDate(messages []tg.MessageClass, topMsgID int) (int, int) {
 // as RTP packets, pacing in real time. It blocks until ctx is cancelled or the
 // source ends.
 func streamAudio(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) error, streamURL string) error {
-	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-hide_banner", "-loglevel", "warning",
-		"-fflags", "+nobuffer",
-		"-user_agent", "Airstation/1.0 (ffmpeg)",
-		"-f", "hls",
-		"-live_start_index", "-3",
-		"-i", streamURL,
-		"-vn",
-		"-ac", "2", "-ar", "48000",
-		"-c:a", "libopus", "-b:a", "64k", "-application", "voip",
-		"-frame_duration", "20",
-		"-f", "ogg", "pipe:1",
-	)
+	// When AIRSTATION_TELEGRAM_TEST_TONE is set, stream a 1 kHz sine wave
+	// instead of the HLS playlist. This isolates connection/RTP issues from
+	// HLS/ffmpeg transcoding issues.
+	var cmd *exec.Cmd
+	if os.Getenv("AIRSTATION_TELEGRAM_TEST_TONE") == "1" {
+		log.Info("using test tone instead of HLS playlist")
+		cmd = exec.CommandContext(ctx, "ffmpeg",
+			"-hide_banner", "-loglevel", "warning",
+			"-f", "lavfi",
+			"-i", "sine=frequency=1000:duration=3600",
+			"-vn",
+			"-ac", "2", "-ar", "48000",
+			"-c:a", "libopus", "-b:a", "64k", "-application", "voip",
+			"-frame_duration", "20",
+			"-f", "ogg", "pipe:1",
+		)
+	} else {
+		cmd = exec.CommandContext(ctx, "ffmpeg",
+			"-hide_banner", "-loglevel", "warning",
+			"-fflags", "+nobuffer",
+			"-user_agent", "Airstation/1.0 (ffmpeg)",
+			"-f", "hls",
+			"-live_start_index", "-3",
+			"-i", streamURL,
+			"-vn",
+			"-ac", "2", "-ar", "48000",
+			"-c:a", "libopus", "-b:a", "64k", "-application", "voip",
+			"-frame_duration", "20",
+			"-f", "ogg", "pipe:1",
+		)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("ffmpeg stdout: %w", err)
