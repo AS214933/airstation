@@ -852,7 +852,9 @@ func topMessageDate(messages []tg.MessageClass, topMsgID int) (int, int) {
 // source ends.
 func streamAudio(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) error, streamURL string) error {
 	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-hide_banner", "-loglevel", "error",
+		"-hide_banner", "-loglevel", "warning",
+		"-fflags", "+nobuffer",
+		"-user_agent", "Airstation/1.0 (ffmpeg)",
 		"-reconnect", "1",
 		"-reconnect_at_eof", "1",
 		"-reconnect_streamed", "1",
@@ -865,15 +867,27 @@ func streamAudio(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) 
 		"-frame_duration", "20",
 		"-f", "ogg", "pipe:1",
 	)
-	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("ffmpeg stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("ffmpeg stderr: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start ffmpeg: %w", err)
 	}
 	log.Info("ffmpeg started", slog.String("url", streamURL))
+
+	// Forward ffmpeg stderr to our logger so warnings/errors are visible.
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			log.Warn("ffmpeg", slog.String("stderr", scanner.Text()))
+		}
+	}()
+
 	defer func() {
 		if err := cmd.Wait(); err != nil {
 			log.Warn("ffmpeg exited", slog.String("error", err.Error()))
