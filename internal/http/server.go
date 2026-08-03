@@ -93,8 +93,12 @@ func (s *Server) Run() {
 		s.logger.Warn("Auto start playing failed: " + err.Error())
 	}
 
-	if err := s.telegramService.Start(); err != nil {
-		s.logger.Warn("Telegram streamer start failed: " + err.Error())
+	// Only start the Telegram voice streamer when playback is actually active;
+	// otherwise it would reconnect to an empty HLS playlist indefinitely.
+	if s.playbackState.Snapshot().IsPlaying {
+		if err := s.telegramService.Start(); err != nil {
+			s.logger.Warn("Telegram streamer start failed: " + err.Error())
+		}
 	}
 
 	go s.playbackState.Run()
@@ -138,13 +142,31 @@ func (s *Server) listenEvents() {
 			select {
 			case trackName := <-s.playbackState.PlayNotify:
 				s.eventsEmitter.RegisterEvent(eventPlay, trackName)
+				go s.syncTelegramStreamer()
 			case <-s.playbackState.PauseNotify:
 				s.eventsEmitter.RegisterEvent(eventPause, " ")
+				go s.syncTelegramStreamer()
 			case trackName := <-s.playbackState.NewTrackNotify:
 				s.eventsEmitter.RegisterEvent(eventNewTrack, trackName)
+				go s.syncTelegramStreamer()
 			}
 		}
 	}()
+}
+
+// syncTelegramStreamer starts or stops the Telegram voice streamer based on
+// the current playback state, so it only consumes the HLS playlist when audio
+// is actually available.
+func (s *Server) syncTelegramStreamer() {
+	if s.playbackState.Snapshot().IsPlaying {
+		if err := s.telegramService.Start(); err != nil {
+			s.logger.Warn("Telegram streamer start failed: " + err.Error())
+		}
+	} else {
+		if err := s.telegramService.Stop(); err != nil {
+			s.logger.Warn("Telegram streamer stop failed: " + err.Error())
+		}
+	}
 }
 
 // Shutdown stops the Telegram streamer subprocess and any background goroutines.
