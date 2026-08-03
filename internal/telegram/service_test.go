@@ -1,11 +1,13 @@
 package telegram
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
 	"testing"
 
+	"github.com/annihilatorrrr/gotgcall"
 	"github.com/cheatsnake/airstation/internal/station"
 )
 
@@ -161,5 +163,97 @@ func TestNormalizeChatID(t *testing.T) {
 		if gotID != tt.wantID || gotChan != tt.wantChan {
 			t.Errorf("normalizeChatID(%d) = (%d, %v), want (%d, %v)", tt.input, gotID, gotChan, tt.wantID, tt.wantChan)
 		}
+	}
+}
+
+func TestGroupCallJoinPayloadHasRequiredMediaMetadata(t *testing.T) {
+	media, err := gotgcall.New(gotgcall.WithFFmpegPath("true"))
+	if err != nil {
+		t.Fatalf("create media transport: %v", err)
+	}
+	defer func() {
+		if err := media.Close(); err != nil {
+			t.Errorf("close media transport: %v", err)
+		}
+	}()
+
+	raw, err := media.CreateCall(-1003548656968)
+	if err != nil {
+		t.Fatalf("create call: %v", err)
+	}
+	raw, err = normalizeGroupCallJoinParams(raw)
+	if err != nil {
+		t.Fatalf("normalize join payload: %v", err)
+	}
+
+	var payload struct {
+		SSRC         int32 `json:"ssrc"`
+		SSRCGroups   []any `json:"ssrc-groups"`
+		PayloadTypes []struct {
+			ID        int    `json:"id"`
+			Name      string `json:"name"`
+			Clockrate int    `json:"clockrate"`
+			Channels  int    `json:"channels"`
+		} `json:"payload-types"`
+		RTPHdrExts []struct {
+			ID  int    `json:"id"`
+			URI string `json:"uri"`
+		} `json:"rtp-hdrexts"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("decode join payload: %v", err)
+	}
+	if payload.SSRC == 0 {
+		t.Error("join payload has no audio SSRC")
+	}
+	if payload.SSRCGroups == nil {
+		t.Error("join payload must include an empty ssrc-groups array for audio-only calls")
+	}
+
+	foundOpus := false
+	for _, codec := range payload.PayloadTypes {
+		if codec.ID == 111 && codec.Name == "opus" && codec.Clockrate == 48000 && codec.Channels == 2 {
+			foundOpus = true
+			break
+		}
+	}
+	if !foundOpus {
+		t.Errorf("join payload has no valid Opus codec: %+v", payload.PayloadTypes)
+	}
+
+	requiredExtensions := map[string]bool{
+		"urn:ietf:params:rtp-hdrext:ssrc-audio-level":                               false,
+		"http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time":                false,
+		"http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01": false,
+		"urn:ietf:params:rtp-hdrext:sdes:mid":                                       false,
+	}
+	for _, extension := range payload.RTPHdrExts {
+		if extension.ID > 0 {
+			if _, ok := requiredExtensions[extension.URI]; ok {
+				requiredExtensions[extension.URI] = true
+			}
+		}
+	}
+	for uri, found := range requiredExtensions {
+		if !found {
+			t.Errorf("join payload is missing required RTP extension %q", uri)
+		}
+	}
+}
+
+func TestNormalizeGroupCallJoinParamsSignsSSRC(t *testing.T) {
+	normalized, err := normalizeGroupCallJoinParams(`{"ssrc":4294967295,"ufrag":"test","payload-types":[]}`)
+	if err != nil {
+		t.Fatalf("normalize join payload: %v", err)
+	}
+
+	var payload struct {
+		SSRC int32 `json:"ssrc"`
+	}
+	if err := json.Unmarshal([]byte(normalized), &payload); err != nil {
+		t.Fatalf("decode normalized payload: %v", err)
+	}
+	if payload.SSRC != -1 {
+		t.Fatalf("SSRC = %d, want -1", payload.SSRC)
 	}
 }

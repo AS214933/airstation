@@ -1,27 +1,22 @@
 package telegram
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"math/rand"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/annihilatorrrr/gotgcall"
 	"github.com/go-faster/errors"
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
-	"github.com/gotd/td/telegram/calls"
 	"github.com/gotd/td/tg"
-	"github.com/pion/rtp"
 )
 
 // ErrPasswordNeeded is returned by SignInUserbot when the account requires
@@ -622,7 +617,7 @@ func (s *Service) streamLoop(ctx context.Context) {
 			wg.Add(1)
 			go func(chatID int64) {
 				defer wg.Done()
-				s.streamChat(ctx, client.API(), dispatcher, joinAs, peers, chatID, getSourceURL)
+				s.streamChat(ctx, client.API(), joinAs, peers, chatID, getSourceURL)
 			}(id)
 		}
 		wg.Wait()
@@ -646,7 +641,22 @@ func (s *Service) streamLoop(ctx context.Context) {
 	}
 }
 
-func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.UpdateDispatcher, joinAs *tg.InputPeerUser, peers map[int64]tg.InputPeerClass, chatID int64, getSourceURL func() string) {
+func (s *Service) streamChat(ctx context.Context, api *tg.Client, joinAs *tg.InputPeerUser, peers map[int64]tg.InputPeerClass, chatID int64, getSourceURL func() string) {
+	log := s.logger.With(slog.Int64("chat", chatID))
+	media, err := gotgcall.New(
+		gotgcall.WithLogger(log),
+		gotgcall.WithFFmpegStderrLog(),
+	)
+	if err != nil {
+		log.Error("Failed to initialize Telegram media transport", slog.String("error", err.Error()))
+		return
+	}
+	defer func() {
+		if err := media.Close(); err != nil {
+			log.Warn("Failed to close Telegram media transport", slog.String("error", err.Error()))
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -656,7 +666,7 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.
 
 		call, err := resolveGroupCall(ctx, api, peers, chatID)
 		if err != nil {
-			s.logger.Warn("No active group call for chat", slog.Int64("chat", chatID), slog.String("error", err.Error()))
+			log.Warn("No active group call for chat", slog.String("error", err.Error()))
 			select {
 			case <-ctx.Done():
 				return
@@ -665,41 +675,9 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.
 			}
 		}
 
-		gc := calls.NewGroupCall(api, calls.Options{})
-		gc.Register(dispatcher)
-		gc.OnConnected(func() {
-			s.logger.Info("Joined voice chat", slog.Int64("chat", chatID))
-		})
-		gc.OnDisconnected(func() {
-			s.logger.Info("Left voice chat", slog.Int64("chat", chatID))
-		})
-		gc.OnParticipants(func(participants []tg.GroupCallParticipant) {
-			for _, p := range participants {
-				if user, ok := p.Peer.(*tg.PeerUser); ok && user.UserID == joinAs.UserID {
-					attrs := []slog.Attr{
-						slog.Int64("user", user.UserID),
-						slog.Bool("muted", p.Muted),
-						slog.Bool("canSelfUnmute", p.CanSelfUnmute),
-						slog.Bool("mutedByYou", p.MutedByYou),
-						slog.Bool("volumeByAdmin", p.VolumeByAdmin),
-					}
-					if volume, ok := p.GetVolume(); ok {
-						attrs = append(attrs, slog.Int("volume", volume))
-					}
-					level := slog.LevelDebug
-					msg := "self participant update"
-					if p.Muted {
-						level = slog.LevelWarn
-						msg = "self participant is muted"
-					}
-					s.logger.LogAttrs(ctx, level, msg, attrs...)
-					break
-				}
-			}
-		})
-
-		if err := gc.Join(ctx, call, joinAs); err != nil {
-			s.logger.Warn("Failed to join voice chat", slog.Int64("chat", chatID), slog.String("error", err.Error()))
+		localParams, err := media.CreateCall(chatID)
+		if err != nil {
+			log.Warn("Failed to create voice chat media transport", slog.String("error", err.Error()))
 			select {
 			case <-ctx.Done():
 				return
@@ -707,6 +685,56 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.
 				continue
 			}
 		}
+		localParams, err = normalizeGroupCallJoinParams(localParams)
+		if err != nil {
+			log.Warn("Failed to normalize voice chat media parameters", slog.String("error", err.Error()))
+			_ = media.Stop(chatID)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+		updates, err := api.PhoneJoinGroupCall(ctx, &tg.PhoneJoinGroupCallRequest{
+			Call:   call,
+			JoinAs: joinAs,
+			Params: tg.DataJSON{Data: localParams},
+		})
+		if err != nil {
+			log.Warn("Failed to join voice chat", slog.String("error", err.Error()))
+			_ = media.Stop(chatID)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+		source := s.voiceChatSource(media, chatID, log)
+		remoteParams, err := groupCallConnectionParams(updates)
+		if err != nil {
+			log.Warn("Voice chat join response is missing media parameters", slog.String("error", err.Error()))
+			s.leaveVoiceChat(ctx, api, call, media, source, chatID, log)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+
+		if err := media.Connect(chatID, remoteParams); err != nil {
+			log.Warn("Failed to connect voice chat media transport", slog.String("error", err.Error()))
+			s.leaveVoiceChat(ctx, api, call, media, source, chatID, log)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+		log.Info("Joined voice chat")
 
 		// Explicitly unmute ourselves and set full volume; some group calls may
 		// mute new joiners or set volume to 0 by default.
@@ -718,17 +746,16 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.
 		editReq.SetVolume(10000) // Telegram volume range is 1-10000, 10000 = 100%.
 		editReq.SetRaiseHand(false)
 		if _, err := api.PhoneEditGroupCallParticipant(ctx, editReq); err != nil {
-			s.logger.Warn("Failed to unmute in voice chat", slog.Int64("chat", chatID), slog.String("error", err.Error()))
+			log.Warn("Failed to unmute in voice chat", slog.String("error", err.Error()))
 		}
+		s.logVoiceChatParticipant(ctx, api, call, joinAs, source, log)
 
-		streamErr := streamAudio(ctx, s.logger.With(slog.Int64("chat", chatID)), gc.WriteAudio, getSourceURL)
+		streamErr := streamGroupAudio(ctx, log, media, chatID, getSourceURL)
 		if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
-			s.logger.Warn("Audio stream ended", slog.Int64("chat", chatID), slog.String("error", streamErr.Error()))
+			log.Warn("Audio stream ended", slog.String("error", streamErr.Error()))
 		}
 
-		if err := gc.Leave(ctx); err != nil {
-			s.logger.Warn("Failed to leave voice chat", slog.Int64("chat", chatID), slog.String("error", err.Error()))
-		}
+		s.leaveVoiceChat(ctx, api, call, media, source, chatID, log)
 
 		select {
 		case <-ctx.Done():
@@ -736,6 +763,124 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.
 		case <-time.After(5 * time.Second):
 		}
 	}
+}
+
+func (s *Service) voiceChatSource(media *gotgcall.Client, chatID int64, log *slog.Logger) int {
+	ssrc, err := media.AudioSSRC(chatID)
+	if err != nil {
+		log.Warn("Failed to read voice chat audio SSRC", slog.String("error", err.Error()))
+		return 0
+	}
+	return int(int32(ssrc))
+}
+
+func (s *Service) leaveVoiceChat(ctx context.Context, api *tg.Client, call *tg.InputGroupCall, media *gotgcall.Client, source int, chatID int64, log *slog.Logger) {
+	if _, err := api.PhoneLeaveGroupCall(ctx, &tg.PhoneLeaveGroupCallRequest{Call: call, Source: source}); err != nil && !errors.Is(err, context.Canceled) {
+		log.Warn("Failed to leave voice chat", slog.String("error", err.Error()))
+	}
+	if err := media.Stop(chatID); err != nil && !errors.Is(err, gotgcall.ErrConnectionNotFound) {
+		log.Warn("Failed to stop voice chat media transport", slog.String("error", err.Error()))
+	}
+	log.Info("Left voice chat")
+}
+
+func groupCallConnectionParams(updates tg.UpdatesClass) (string, error) {
+	var list []tg.UpdateClass
+	switch updates := updates.(type) {
+	case *tg.Updates:
+		list = updates.Updates
+	case *tg.UpdatesCombined:
+		list = updates.Updates
+	}
+	for _, update := range list {
+		if connection, ok := update.(*tg.UpdateGroupCallConnection); ok {
+			return connection.Params.Data, nil
+		}
+	}
+	return "", errors.New("no updateGroupCallConnection in join response")
+}
+
+// normalizeGroupCallJoinParams matches tgcalls' JSON convention for SSRCs.
+// Telegram's group-call protocol carries a signed 32-bit source ID in JSON,
+// while gotgcall exposes the same bit pattern as uint32. Values above MaxInt32
+// must therefore be re-encoded before PhoneJoinGroupCall sees them.
+func normalizeGroupCallJoinParams(raw string) (string, error) {
+	var params map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &params); err != nil {
+		return "", fmt.Errorf("decode group-call parameters: %w", err)
+	}
+	ssrcRaw, ok := params["ssrc"]
+	if !ok {
+		return "", errors.New("group-call parameters contain no audio SSRC")
+	}
+
+	var signedSSRC int32
+	if err := json.Unmarshal(ssrcRaw, &signedSSRC); err == nil {
+		if signedSSRC == 0 {
+			return "", errors.New("group-call parameters contain a zero audio SSRC")
+		}
+		return raw, nil
+	}
+
+	var unsignedSSRC uint32
+	if err := json.Unmarshal(ssrcRaw, &unsignedSSRC); err != nil {
+		return "", fmt.Errorf("decode group-call audio SSRC: %w", err)
+	}
+	if unsignedSSRC == 0 {
+		return "", errors.New("group-call parameters contain a zero audio SSRC")
+	}
+	params["ssrc"] = json.RawMessage(strconv.FormatInt(int64(int32(unsignedSSRC)), 10))
+
+	normalized, err := json.Marshal(params)
+	if err != nil {
+		return "", fmt.Errorf("encode group-call parameters: %w", err)
+	}
+	return string(normalized), nil
+}
+
+func (s *Service) logVoiceChatParticipant(ctx context.Context, api *tg.Client, call *tg.InputGroupCall, joinAs *tg.InputPeerUser, source int, log *slog.Logger) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	participants, err := api.PhoneGetGroupParticipants(ctx, &tg.PhoneGetGroupParticipantsRequest{
+		Call: call,
+		IDs: []tg.InputPeerClass{
+			joinAs,
+		},
+		Limit: 1,
+	})
+	if err != nil {
+		log.Warn("Failed to read voice chat participant state", slog.String("error", err.Error()))
+		return
+	}
+	for _, participant := range participants.Participants {
+		peer, ok := participant.Peer.(*tg.PeerUser)
+		if !ok || peer.UserID != joinAs.UserID {
+			continue
+		}
+
+		attrs := []slog.Attr{
+			slog.Int64("user", peer.UserID),
+			slog.Int("source", participant.Source),
+			slog.Bool("sourceMatches", participant.Source == source),
+			slog.Bool("muted", participant.Muted),
+			slog.Bool("canSelfUnmute", participant.CanSelfUnmute),
+			slog.Bool("volumeByAdmin", participant.VolumeByAdmin),
+		}
+		if volume, ok := participant.GetVolume(); ok {
+			attrs = append(attrs, slog.Int("volume", volume))
+		}
+		if participant.Muted || participant.Source != source {
+			log.LogAttrs(ctx, slog.LevelWarn, "voice chat participant state prevents audio", attrs...)
+		} else {
+			log.LogAttrs(ctx, slog.LevelInfo, "voice chat participant state confirmed", attrs...)
+		}
+		return
+	}
+	log.Warn("Joined voice chat but self participant was not returned")
 }
 
 func resolveGroupCall(ctx context.Context, api *tg.Client, peers map[int64]tg.InputPeerClass, chatID int64) (*tg.InputGroupCall, error) {
@@ -909,265 +1054,65 @@ func topMessageDate(messages []tg.MessageClass, topMsgID int) (int, int) {
 	return 0, 0
 }
 
-// streamAudio continuously transcodes the active Airstation audio source to Opus
-// and feeds it to write as RTP packets. When the playback source changes it
-// restarts ffmpeg with the new URL, keeping the call joined. This is the same
-// pattern used by music bots: feed the current source directly to the voice
-// engine instead of routing through an HLS playlist.
-func streamAudio(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) error, getURL func() string) error {
-	if os.Getenv("AIRSTATION_TELEGRAM_TEST_TONE") == "1" {
-		return streamAudioSource(ctx, log, write, "", nil, true)
-	}
+// streamGroupAudio keeps the call connected while playback starts, pauses,
+// changes tracks, or an input reaches EOF. gotgcall owns Opus packetisation,
+// RTP extensions, pacing, and SRTP encryption; this layer only mirrors the
+// Airstation playback source into that transport.
+func streamGroupAudio(ctx context.Context, log *slog.Logger, media *gotgcall.Client, chatID int64, getURL func() string) error {
+	streamEnded := make(chan struct{}, 1)
+	media.OnStreamEnd(func(endedChatID int64, streamType gotgcall.StreamType, _ gotgcall.Device, err error) {
+		if endedChatID != chatID || streamType != gotgcall.Audio {
+			return
+		}
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Warn("ffmpeg audio source ended", slog.String("error", err.Error()))
+		}
+		select {
+		case streamEnded <- struct{}{}:
+		default:
+		}
+	})
 
+	var activeURL string
+	paused := false
 	for {
 		url := getURL()
 		if url == "" {
-			log.Debug("no audio source available, waiting")
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(1 * time.Second):
-				continue
+			if activeURL != "" && !paused {
+				if _, err := media.Pause(chatID); err != nil {
+					return fmt.Errorf("pause audio stream: %w", err)
+				}
+				paused = true
+				log.Info("audio source paused")
 			}
-		}
-
-		log.Info("streaming audio source", slog.String("url", url))
-		err := streamAudioSource(ctx, log, write, url, getURL, false)
-		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, errSourceURLChanged) {
-			log.Warn("audio source ended", slog.String("error", err.Error()))
+		} else if url != activeURL {
+			if err := media.SetStreamSources(chatID, gotgcall.FromURL(url, gotgcall.EncodeOptions{})); err != nil {
+				return fmt.Errorf("start audio stream: %w", err)
+			}
+			activeURL = url
+			log.Info("streaming audio source")
+			if paused {
+				if _, err := media.Resume(chatID); err != nil {
+					return fmt.Errorf("resume audio stream: %w", err)
+				}
+				paused = false
+			}
+		} else if paused {
+			if _, err := media.Resume(chatID); err != nil {
+				return fmt.Errorf("resume audio stream: %w", err)
+			}
+			paused = false
+			log.Info("audio source resumed")
 		}
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(1 * time.Second):
-		}
-	}
-}
-
-var errSourceURLChanged = errors.New("audio source URL changed")
-
-// streamAudioSource transcodes a single audio source to Opus and sends it as
-// RTP packets. When testTone is true it generates a 1 kHz sine wave instead.
-// If getURL is set and the URL changes, it returns errSourceURLChanged so the
-// caller can restart with the new source.
-func streamAudioSource(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) error, streamURL string, getURL func() string, testTone bool) error {
-	var cmd *exec.Cmd
-	if testTone {
-		log.Info("using test tone instead of audio source")
-		cmd = exec.CommandContext(ctx, "ffmpeg",
-			"-hide_banner", "-loglevel", "warning",
-			"-f", "lavfi",
-			"-i", "sine=frequency=1000:duration=3600",
-			"-vn",
-			"-ac", "2", "-ar", "48000",
-			"-c:a", "libopus", "-b:a", "64k", "-application", "voip",
-			"-frame_duration", "20",
-			"-f", "ogg", "pipe:1",
-		)
-	} else {
-		cmd = exec.CommandContext(ctx, "ffmpeg",
-			"-hide_banner", "-loglevel", "warning",
-			"-fflags", "+nobuffer",
-			"-user_agent", "Mozilla/5.0 (compatible; Airstation/1.0)",
-			"-headers", "Referer: https://music.163.com\r\nCache-Control: no-cache\r\n",
-			"-i", streamURL,
-			"-vn",
-			"-ac", "2", "-ar", "48000",
-			"-c:a", "libopus", "-b:a", "64k", "-application", "voip",
-			"-frame_duration", "20",
-			"-f", "ogg", "pipe:1",
-		)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("ffmpeg stdout: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("ffmpeg stderr: %w", err)
-	}
-
-	// Optional debug: save ffmpeg's Ogg Opus output to a file for inspection.
-	var debugFile *os.File
-	var debugStdout io.Reader = stdout
-	if debugPath := os.Getenv("AIRSTATION_TELEGRAM_DEBUG_AUDIO"); debugPath != "" {
-		debugFile, err = os.Create(debugPath)
-		if err != nil {
-			log.Warn("failed to create debug audio file", slog.String("path", debugPath), slog.String("error", err.Error()))
-		} else {
-			log.Info("saving ffmpeg audio output to debug file", slog.String("path", debugPath))
-			debugStdout = io.TeeReader(stdout, debugFile)
-		}
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start ffmpeg: %w", err)
-	}
-	log.Info("ffmpeg started", slog.String("url", streamURL))
-
-	defer func() {
-		if debugFile != nil {
-			if err := debugFile.Close(); err != nil {
-				log.Warn("failed to close debug audio file", slog.String("path", debugFile.Name()), slog.String("error", err.Error()))
+		case <-streamEnded:
+			if !paused {
+				activeURL = ""
 			}
-		}
-	}()
-
-	// Forward ffmpeg stderr to our logger so warnings/errors are visible.
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			log.Warn("ffmpeg", slog.String("stderr", scanner.Text()))
-		}
-	}()
-
-	defer func() {
-		if err := cmd.Wait(); err != nil {
-			log.Warn("ffmpeg exited", slog.String("error", err.Error()))
-		}
-	}()
-
-	ogg := &oggDemuxer{r: bufio.NewReader(debugStdout)}
-
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-
-	seq := uint16(rand.Uint32()) //nolint:gosec
-	ts := rand.Uint32()          //nolint:gosec
-	opusSamples := uint32(48000 / 1000 * 20)
-	marker := true
-	framesSinceURLCheck := 0
-	for {
-		frame, err := ogg.nextAudioFrame()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read opus frame: %w", err)
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		}
-
-		// Check for a new source URL every ~1 second so track transitions are
-		// picked up without leaving the voice call.
-		framesSinceURLCheck++
-		if getURL != nil && framesSinceURLCheck >= 50 {
-			framesSinceURLCheck = 0
-			if newURL := getURL(); newURL != streamURL {
-				log.Info("audio source changed, restarting ffmpeg", slog.String("old", streamURL), slog.String("new", newURL))
-				return errSourceURLChanged
-			}
-		}
-
-		seq++
-		ts += opusSamples
-		if seq%250 == 0 {
-			log.Debug("sending audio frames", slog.Uint64("seq", uint64(seq)), slog.Int("payload", len(frame)))
-		}
-		if err := write(&rtp.Packet{
-			Header: rtp.Header{
-				Version:        2,
-				Marker:         marker,
-				PayloadType:    111,
-				SequenceNumber: seq,
-				Timestamp:      ts,
-			},
-			Payload: frame,
-		}); err != nil {
-			if errors.Is(err, io.ErrClosedPipe) {
-				return nil
-			}
-			return fmt.Errorf("write rtp: %w", err)
-		}
-		if marker {
-			log.Info("first audio RTP frame sent")
-		}
-		marker = false
-	}
-}
-
-const (
-	opusHeadMagic = "OpusHead"
-	opusTagsMagic = "OpusTags"
-)
-
-func isOpusHead(packet []byte) bool {
-	return len(packet) >= len(opusHeadMagic) && string(packet[:len(opusHeadMagic)]) == opusHeadMagic
-}
-
-func isOpusTags(packet []byte) bool {
-	return len(packet) >= len(opusTagsMagic) && string(packet[:len(opusTagsMagic)]) == opusTagsMagic
-}
-
-type oggDemuxer struct {
-	r     io.Reader
-	queue [][]byte
-	cur   []byte
-}
-
-// nextAudioFrame returns the next Opus audio packet, skipping the OpusHead and
-// OpusTags header packets that can reappear whenever ffmpeg reinitializes the
-// Opus encoder (e.g., during HLS discontinuities or source changes).
-func (d *oggDemuxer) nextAudioFrame() ([]byte, error) {
-	for {
-		pkt, err := d.nextPacket()
-		if err != nil {
-			return nil, err
-		}
-		if isOpusHead(pkt) || isOpusTags(pkt) {
-			continue
-		}
-		return pkt, nil
-	}
-}
-
-func (d *oggDemuxer) nextPacket() ([]byte, error) {
-	for len(d.queue) == 0 {
-		if err := d.readPage(); err != nil {
-			return nil, err
+		case <-time.After(time.Second):
 		}
 	}
-	pkt := d.queue[0]
-	d.queue = d.queue[1:]
-	return pkt, nil
-}
-
-func (d *oggDemuxer) readPage() error {
-	var header [27]byte
-	if _, err := io.ReadFull(d.r, header[:]); err != nil {
-		return err
-	}
-	if string(header[0:4]) != "OggS" {
-		return errors.New("invalid ogg capture pattern")
-	}
-
-	segments := int(header[26])
-	table := make([]byte, segments)
-	if _, err := io.ReadFull(d.r, table); err != nil {
-		return err
-	}
-	total := 0
-	for _, n := range table {
-		total += int(n)
-	}
-	data := make([]byte, total)
-	if _, err := io.ReadFull(d.r, data); err != nil {
-		return err
-	}
-
-	off := 0
-	for _, n := range table {
-		d.cur = append(d.cur, data[off:off+int(n)]...)
-		off += int(n)
-		if n < 255 {
-			d.queue = append(d.queue, d.cur)
-			d.cur = nil
-		}
-	}
-	return nil
 }
