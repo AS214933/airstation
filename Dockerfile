@@ -27,7 +27,7 @@ WORKDIR /app
 
 # Install FFmpeg and clean up apt caches.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends ca-certificates ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 
