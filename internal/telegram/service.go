@@ -668,12 +668,15 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.
 					attrs := []slog.Attr{
 						slog.Int64("user", user.UserID),
 						slog.Bool("muted", p.Muted),
-						slog.Bool("speaking", p.Speaking),
-						slog.Int("volume", p.Volume),
 						slog.Bool("canSelfUnmute", p.CanSelfUnmute),
+						slog.Bool("mutedByYou", p.MutedByYou),
+						slog.Bool("volumeByAdmin", p.VolumeByAdmin),
 					}
-					if p.Muted || p.Volume == 0 {
-						s.logger.Warn("self participant is muted or silent", attrs...)
+					if volume, ok := p.GetVolume(); ok {
+						attrs = append(attrs, slog.Int("volume", volume))
+					}
+					if p.Muted {
+						s.logger.Warn("self participant is muted", attrs...)
 					} else {
 						s.logger.LogAttrs(ctx, slog.LevelDebug, "self participant update", attrs...)
 					}
