@@ -659,7 +659,7 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, joinAs *tg.Inp
 			}
 		}
 
-		streamErr := streamAudio(ctx, gc.WriteAudio, streamURL)
+		streamErr := streamAudio(ctx, s.logger.With(slog.Int64("chat", chatID)), gc.WriteAudio, streamURL)
 		if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
 			s.logger.Warn("Audio stream ended", slog.Int64("chat", chatID), slog.String("error", streamErr.Error()))
 		}
@@ -850,7 +850,7 @@ func topMessageDate(messages []tg.MessageClass, topMsgID int) (int, int) {
 // streamAudio transcodes the stream URL to Opus with ffmpeg and feeds it to write
 // as RTP packets, pacing in real time. It blocks until ctx is cancelled or the
 // source ends.
-func streamAudio(ctx context.Context, write func(*rtp.Packet) error, streamURL string) error {
+func streamAudio(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) error, streamURL string) error {
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-reconnect", "1",
@@ -873,7 +873,12 @@ func streamAudio(ctx context.Context, write func(*rtp.Packet) error, streamURL s
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start ffmpeg: %w", err)
 	}
-	defer func() { _ = cmd.Wait() }()
+	log.Info("ffmpeg started", slog.String("url", streamURL))
+	defer func() {
+		if err := cmd.Wait(); err != nil {
+			log.Warn("ffmpeg exited", slog.String("error", err.Error()))
+		}
+	}()
 
 	ogg := &oggDemuxer{r: bufio.NewReader(stdout)}
 	for range 2 {
@@ -906,6 +911,9 @@ func streamAudio(ctx context.Context, write func(*rtp.Packet) error, streamURL s
 
 		seq++
 		ts += opusSamples
+		if seq%250 == 0 {
+			log.Debug("sending audio frames", slog.Uint64("seq", uint64(seq)), slog.Int("payload", len(frame)))
+		}
 		if err := write(&rtp.Packet{
 			Header: rtp.Header{
 				Version:        2,
@@ -920,6 +928,9 @@ func streamAudio(ctx context.Context, write func(*rtp.Packet) error, streamURL s
 				return nil
 			}
 			return fmt.Errorf("write rtp: %w", err)
+		}
+		if marker {
+			log.Info("first audio RTP frame sent")
 		}
 		marker = false
 	}
