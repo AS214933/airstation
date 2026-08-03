@@ -708,13 +708,15 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.
 			}
 		}
 
-		// Explicitly unmute ourselves; some group calls may mute new joiners by
-		// default even if the join request doesn't ask for it.
+		// Explicitly unmute ourselves and set full volume; some group calls may
+		// mute new joiners or set volume to 0 by default.
 		editReq := &tg.PhoneEditGroupCallParticipantRequest{
 			Call:        call,
 			Participant: joinAs,
 		}
 		editReq.SetMuted(false)
+		editReq.SetVolume(10000) // Telegram volume range is 1-10000, 10000 = 100%.
+		editReq.SetRaiseHand(false)
 		if _, err := api.PhoneEditGroupCallParticipant(ctx, editReq); err != nil {
 			s.logger.Warn("Failed to unmute in voice chat", slog.Int64("chat", chatID), slog.String("error", err.Error()))
 		}
@@ -985,10 +987,32 @@ func streamAudioSource(ctx context.Context, log *slog.Logger, write func(*rtp.Pa
 	if err != nil {
 		return fmt.Errorf("ffmpeg stderr: %w", err)
 	}
+
+	// Optional debug: save ffmpeg's Ogg Opus output to a file for inspection.
+	var debugFile *os.File
+	var debugStdout io.Reader = stdout
+	if debugPath := os.Getenv("AIRSTATION_TELEGRAM_DEBUG_AUDIO"); debugPath != "" {
+		debugFile, err = os.Create(debugPath)
+		if err != nil {
+			log.Warn("failed to create debug audio file", slog.String("path", debugPath), slog.String("error", err.Error()))
+		} else {
+			log.Info("saving ffmpeg audio output to debug file", slog.String("path", debugPath))
+			debugStdout = io.TeeReader(stdout, debugFile)
+		}
+	}
+
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start ffmpeg: %w", err)
 	}
 	log.Info("ffmpeg started", slog.String("url", streamURL))
+
+	defer func() {
+		if debugFile != nil {
+			if err := debugFile.Close(); err != nil {
+				log.Warn("failed to close debug audio file", slog.String("path", debugFile.Name()), slog.String("error", err.Error()))
+			}
+		}
+	}()
 
 	// Forward ffmpeg stderr to our logger so warnings/errors are visible.
 	go func() {
@@ -1004,7 +1028,7 @@ func streamAudioSource(ctx context.Context, log *slog.Logger, write func(*rtp.Pa
 		}
 	}()
 
-	ogg := &oggDemuxer{r: bufio.NewReader(stdout)}
+	ogg := &oggDemuxer{r: bufio.NewReader(debugStdout)}
 
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()

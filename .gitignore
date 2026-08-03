@@ -4,3 +4,4 @@ static
 storage/telegram/
 __pycache__/
 *.pyc
+/main
