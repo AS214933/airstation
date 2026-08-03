@@ -26,3 +26,13 @@ func TestLoadUsesConfiguredTmpRetention(t *testing.T) {
 		t.Fatalf("tmp retention = %s, want 12h", conf.TmpRetention)
 	}
 }
+
+func TestLoadUsesConfiguredDebug(t *testing.T) {
+	t.Setenv("AIRSTATION_SECRET_KEY", "1234567890")
+	t.Setenv("AIRSTATION_JWT_SIGN", "1234567890")
+	t.Setenv("AIRSTATION_DEBUG", "true")
+
+	if !Load().Debug {
+		t.Fatal("Debug = false, want true")
+	}
+}

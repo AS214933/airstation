@@ -115,9 +115,14 @@ func newCustomJSONHandler(w io.Writer, opts *slog.HandlerOptions) *customJSONHan
 	}
 }
 
-func New() *slog.Logger {
+func New(debug bool) *slog.Logger {
+	level := slog.LevelInfo
+	if debug {
+		level = slog.LevelDebug
+	}
+
 	handler := newCustomJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: level,
 	})
 
 	return slog.New(handler)

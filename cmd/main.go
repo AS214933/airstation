@@ -27,7 +27,7 @@ func main() {
 	stopSignal := make(chan os.Signal, 1)
 	signal.Notify(stopSignal, os.Interrupt, syscall.SIGTERM)
 
-	log := logger.New()
+	log := logger.New(conf.Debug)
 	cleanupCtx, stopCleanup := context.WithCancel(context.Background())
 	defer stopCleanup()
 	go fs.RunFileCleanup(cleanupCtx, conf.TmpDir, conf.TmpRetention, time.Hour, log.WithGroup("cleanup"))

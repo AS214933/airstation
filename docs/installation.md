@@ -58,6 +58,7 @@ For overseas deployments, Airstation sends NetEase API requests with a mainland 
 Set `AIRSTATION_NETEASE_REAL_IP` to another mainland IP if needed, or set it to `off` to disable the header.
 Temporary HLS files in `AIRSTATION_TMP_DIR` are cleaned automatically after 24 hours by default.
 Set `AIRSTATION_TMP_RETENTION` to another Go duration such as `12h` or `48h` if you need a different retention window.
+Logs are `Info` level by default. Set `AIRSTATION_DEBUG=true` temporarily to include diagnostic Telegram ICE, media, and FFmpeg messages; remove it or set it to `false` for normal operation.
 
 ### Telegram voice stream (optional)
 

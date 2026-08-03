@@ -24,6 +24,7 @@ type Config struct {
 	SecretKey     string
 	SecureCookie  bool
 	NetEaseRealIP string
+	Debug         bool
 }
 
 func Load() *Config {
@@ -41,6 +42,7 @@ func Load() *Config {
 		SecretKey:     getSecret("AIRSTATION_SECRET_KEY"),
 		SecureCookie:  getEnvBool("AIRSTATION_SECURE_COOKIE", false),
 		NetEaseRealIP: getEnv("AIRSTATION_NETEASE_REAL_IP", ""),
+		Debug:         getEnvBool("AIRSTATION_DEBUG", false),
 	}
 }
 
