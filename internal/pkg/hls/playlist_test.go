@@ -137,6 +137,43 @@ func TestGenerate(t *testing.T) {
 	}
 }
 
+func TestGenerateDoesNotAddDiscontinuityForContinuousSegments(t *testing.T) {
+	playlist := newThreeSegmentPlaylist([]*Segment{
+		{Duration: 5, Path: "segment0.m4s"},
+		{Duration: 5, Path: "segment1.m4s"},
+		{Duration: 5, Path: "segment2.m4s"},
+	}, nil)
+
+	playlist.Generate(0)
+	playlist.Generate(5)
+	got := playlist.Generate(6)
+
+	if strings.Contains(got, "#EXT-X-DISCONTINUITY-SEQUENCE:1") {
+		t.Fatalf("continuous segments incremented discontinuity sequence:\n%s", got)
+	}
+	if strings.Contains(got, "#EXT-X-DISCONTINUITY\n#EXTINF") {
+		t.Fatalf("continuous segment unexpectedly has discontinuity tag:\n%s", got)
+	}
+}
+
+func TestGenerateAdvancesDiscontinuityAfterTaggedSegmentLeavesWindow(t *testing.T) {
+	playlist := newThreeSegmentPlaylist([]*Segment{
+		{Duration: 5, Path: "track-start.m4s", IsFirst: true},
+		{Duration: 5, Path: "track-next.m4s"},
+		{Duration: 5, Path: "track-last.m4s"},
+	}, nil)
+
+	playlist.Generate(0)
+	got := playlist.Generate(5)
+
+	if !strings.Contains(got, "#EXT-X-DISCONTINUITY-SEQUENCE:1") {
+		t.Fatalf("removed discontinuity was not reflected in sequence:\n%s", got)
+	}
+	if strings.Contains(got, "#EXT-X-DISCONTINUITY\n#EXTINF") {
+		t.Fatalf("discontinuity tag remained after its segment left the window:\n%s", got)
+	}
+}
+
 func TestNext(t *testing.T) {
 	current := []*Segment{
 		{Duration: 5.0, Path: "segment1.ts"},
@@ -406,6 +443,13 @@ func TestHlsHeader(t *testing.T) {
 			}
 
 		})
+	}
+}
+
+func TestHlsHeaderOmitsVolatileProgramDateTime(t *testing.T) {
+	got := hlsHeader(5, 1, 0, 0)
+	if strings.Contains(got, "#EXT-X-PROGRAM-DATE-TIME:") {
+		t.Fatalf("HLS header has an unstable program date time:\n%s", got)
 	}
 }
 

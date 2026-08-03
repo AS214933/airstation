@@ -4,7 +4,6 @@ package hls
 import (
 	"math"
 	"strconv"
-	"time"
 )
 
 // Playlist represents an HLS playlist structure.
@@ -12,12 +11,12 @@ type Playlist struct {
 	LiveSegmentsAmount int // The number of live segments in the playlist.
 	MaxSegmentDuration int // The maximum duration (in seconds) of a segment in the playlist.
 
-	mediaSequence        int64
-	disconSequence       int64
-	lastDisconUpdate     time.Time
-	currentTrackSegments []*Segment
-	nextTrackSegments    []*Segment
-	currentSegmentPath   string
+	mediaSequence                 int64
+	disconSequence                int64
+	currentTrackSegments          []*Segment
+	nextTrackSegments             []*Segment
+	currentSegmentPath            string
+	currentSegmentIsDiscontinuity bool
 }
 
 // NewPlaylist creates and returns a new Playlist instance with the provided current and next track segments.
@@ -35,9 +34,8 @@ func NewPlaylist(cur, next []*Segment) *Playlist {
 		LiveSegmentsAmount: DefaultLiveSegmentsAmount,
 		MaxSegmentDuration: DefaultMaxSegmentDuration,
 
-		mediaSequence:    0,
-		disconSequence:   0,
-		lastDisconUpdate: time.Now(),
+		mediaSequence:  0,
+		disconSequence: 0,
 
 		currentTrackSegments: cur,
 		nextTrackSegments:    next,
@@ -58,15 +56,16 @@ func NewPlaylist(cur, next []*Segment) *Playlist {
 func (p *Playlist) Generate(elapsedTime float64) string {
 	offset := math.Mod(elapsedTime, float64(p.MaxSegmentDuration))
 	liveSegments := p.currentSegments(elapsedTime)
-	prevSegmentPath := p.currentSegmentPath
-
-	if len(liveSegments) > 0 {
-		p.currentSegmentPath = liveSegments[0].Path
-	}
-
-	p.UpdateDisconSequence(elapsedTime)
-	if prevSegmentPath != p.currentSegmentPath {
+	if len(liveSegments) > 0 && p.currentSegmentPath != liveSegments[0].Path {
+		// The discontinuity sequence counts discontinuity tags that were
+		// removed before the first listed segment. Increment it only when the
+		// previous first segment carried that tag, never merely as time passes.
+		if p.currentSegmentPath != "" && p.currentSegmentIsDiscontinuity {
+			p.disconSequence++
+		}
 		p.mediaSequence++
+		p.currentSegmentPath = liveSegments[0].Path
+		p.currentSegmentIsDiscontinuity = liveSegments[0].IsFirst
 	}
 
 	playlist := hlsHeader(p.MaxSegmentDuration, p.mediaSequence, p.disconSequence, offset)
@@ -115,26 +114,6 @@ func (p *Playlist) SetMediaSequence(sequence int64) {
 	p.mediaSequence = sequence
 }
 
-// UpdateDisconSequence updates the discontinuity sequence if a discontinuity is detected.
-//
-// Parameters:
-//   - elapsedTime: The elapsed time in seconds used to calculate the current segment index.
-func (p *Playlist) UpdateDisconSequence(elapsedTime float64) {
-	elapsedFromLastUpdate := time.Until(p.lastDisconUpdate).Seconds()
-	if math.Abs(elapsedFromLastUpdate) < float64(p.MaxSegmentDuration) {
-		return
-	}
-
-	index := p.calcCurrentSegmentIndex(elapsedTime)
-
-	// if the current track segment is the second and it is not the very first track,
-	// there was a discontinuty, so we increment the discontinuty counter
-	if index == 1 && p.mediaSequence > 1 {
-		p.disconSequence++
-		p.lastDisconUpdate = time.Now()
-	}
-}
-
 func (p *Playlist) FirstNextTrackSegment() *Segment {
 	if len(p.nextTrackSegments) > 0 {
 		return p.nextTrackSegments[0]
@@ -171,10 +150,8 @@ func (p *Playlist) calcCurrentSegmentIndex(elapsedTime float64) int {
 
 // hlsHeader generates the header string for an HLS playlist with the specified target duration.
 func hlsHeader(dur int, mediaSeq, disconSeq int64, offset float64) string {
-	currentTime := time.Now().UTC().Round(time.Millisecond).Format(timeFormat)
 	return "#EXTM3U\n" +
 		"#EXT-X-VERSION:7\n" +
-		"#EXT-X-PROGRAM-DATE-TIME:" + currentTime + "\n" +
 		"#EXT-X-TARGETDURATION:" + strconv.Itoa(dur) + "\n" +
 		"#EXT-X-MEDIA-SEQUENCE:" + strconv.FormatInt(mediaSeq, 10) + "\n" +
 		"#EXT-X-DISCONTINUITY-SEQUENCE:" + strconv.FormatInt(disconSeq, 10) + "\n" +
