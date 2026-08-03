@@ -85,8 +85,6 @@ func (s *Service) Load() error {
 			cfg.APIHash = prop.Value
 		case propSessionString:
 			cfg.SessionString = prop.Value
-		case propStreamURL:
-			cfg.StreamURL = prop.Value
 		case propChatIDs:
 			cfg.ChatIDs = parseChatIDs(prop.Value)
 		}
@@ -133,7 +131,6 @@ func (s *Service) PublicConfig() PublicConfig {
 
 	return PublicConfig{
 		Enabled:    s.config.Enabled,
-		StreamURL:  s.config.StreamURL,
 		ChatIDs:    append([]string(nil), s.config.ChatIDs...),
 		HasAPIID:   s.config.APIID != 0,
 		HasAPIHash: s.config.APIHash != "",
@@ -185,11 +182,9 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 		cleanedIDs = append(cleanedIDs, id)
 	}
 	newConfig.ChatIDs = cleanedIDs
-	// Stream URL is ignored; the streamer always uses the local Airstation HLS
-	// playlist. Keep the field empty in storage for clarity.
+	// The voice source is fixed to the active Airstation playback URL. Retain
+	// this field as an empty compatibility value for older clients.
 	newConfig.StreamURL = ""
-	// The streamer is always driven by the current Airstation playback source URL;
-	// any configured external stream URL is ignored.
 
 	if _, err := s.store.UpsertStationProperty(propEnabled, strconv.FormatBool(newConfig.Enabled)); err != nil {
 		return PublicConfig{}, err

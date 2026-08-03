@@ -51,14 +51,14 @@ func (i IntString) Int() int {
 }
 
 // Config holds the full Telegram voice stream configuration, including secrets.
-// Voice streaming requires a Pyrogram user session string; bot tokens are not
-// supported because Telegram does not allow bots to join voice chats.
+// Voice streaming requires an authenticated MTProto user session; bot tokens
+// are not supported because Telegram does not allow bots to join voice chats.
 type Config struct {
 	Enabled       bool      `json:"enabled"`
 	APIID         IntString `json:"apiID"`
 	APIHash       string    `json:"apiHash"`
 	SessionString string    `json:"sessionString"`
-	StreamURL     string    `json:"streamURL"`
+	StreamURL     string    `json:"streamURL"` // Kept empty for backwards-compatible API payloads.
 	ChatIDs       []string  `json:"chatIDs"`
 }
 

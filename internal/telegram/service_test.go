@@ -72,6 +72,9 @@ func TestServiceLoad(t *testing.T) {
 	if cfg.SessionString != "session" {
 		t.Errorf("expected SessionString=session, got %q", cfg.SessionString)
 	}
+	if cfg.StreamURL != "" {
+		t.Errorf("expected legacy StreamURL to be ignored, got %q", cfg.StreamURL)
+	}
 	if len(cfg.ChatIDs) != 2 || cfg.ChatIDs[0] != "-1001" || cfg.ChatIDs[1] != "-1002" {
 		t.Errorf("unexpected chat IDs: %v", cfg.ChatIDs)
 	}

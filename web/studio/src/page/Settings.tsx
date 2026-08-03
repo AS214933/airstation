@@ -393,11 +393,6 @@ const TelegramVoiceSetup: FC<{
 
     return (
         <Flex direction="column" gap="sm">
-            <Text size="sm" c="dimmed">
-                Stream the Airstation HLS feed live into Telegram group or channel voice chats using py-tgcalls. You must
-                log in with a Telegram user account; bot accounts cannot join voice chats.
-            </Text>
-
             <Switch
                 label="Enable Telegram voice stream"
                 disabled={loading}

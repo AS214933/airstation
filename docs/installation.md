@@ -61,7 +61,7 @@ Set `AIRSTATION_TMP_RETENTION` to another Go duration such as `12h` or `48h` if 
 
 ### Telegram voice stream (optional)
 
-You can stream the Airstation HLS feed live into one or more Telegram group/channel voice chats. This requires:
+You can stream the current Airstation playback into one or more Telegram group/channel voice chats. Airstation reads the active source directly and transcodes it for Telegram; no public HLS URL is required. This requires:
 
 - Your `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
 - A Telegram **user account**. Bot accounts cannot join voice chats, so Bot API tokens are not supported.
@@ -72,10 +72,9 @@ Steps:
 2. In the Studio settings, open **Telegram voice stream** and fill in:
    - API ID
    - API hash
-   - The public Airstation HLS stream URL (e.g. `http://your-host:7331/stream`)
    - Comma-separated Telegram chat IDs (e.g. `-1001234567890`)
-3. Click **Login with Telegram**. Enter the phone number (with country code, e.g. `+8613800138000`), request a code, enter the code from Telegram, and provide the 2FA password if the account has two-step verification enabled. Airstation saves the Pyrogram session string automatically.
-4. Click **Save**, then **Test credentials**. Airstation starts an in-process gotd voice call that joins the voice chats and streams the same HLS feed the web player uses.
+3. Click **Login with Telegram**. Enter the phone number (with country code, e.g. `+8613800138000`), request a code, enter the code from Telegram, and provide the 2FA password if the account has two-step verification enabled. Airstation saves the authenticated MTProto session automatically.
+4. Click **Save**, then **Test credentials**. Airstation joins the configured voice chats with the user account and streams the current playback source.
 
 > The Telegram user account must already be a member of the target group or channel, and the group/channel must have an active voice/video chat. The configuration is hot-reloaded: saving new settings restarts the streamer without restarting Airstation.
 
