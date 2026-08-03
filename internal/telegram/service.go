@@ -677,9 +677,10 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, joinAs *tg.Inp
 }
 
 func resolveGroupCall(ctx context.Context, api *tg.Client, peers map[int64]tg.InputPeerClass, chatID int64) (*tg.InputGroupCall, error) {
-	peer, ok := peers[chatID]
+	peerID, isChannel := normalizeChatID(chatID)
+	peer, ok := peers[peerID]
 	if !ok {
-		return nil, fmt.Errorf("chat %d not found in peer list", chatID)
+		return nil, fmt.Errorf("chat %d (resolved peer %d, channel=%v) not found in peer list; ensure the account is a member and the chat has at least one message", chatID, peerID, isChannel)
 	}
 
 	switch p := peer.(type) {
@@ -808,6 +809,26 @@ func fetchInputPeers(ctx context.Context, api *tg.Client) (map[int64]tg.InputPee
 	}
 
 	return peers, nil
+}
+
+// normalizeChatID converts a Telegram bot API chat ID to an MTProto peer ID.
+//
+// Telegram uses three ID spaces in the bot API:
+//   - Users: positive user_id
+//   - Legacy groups: -chat_id
+//   - Channels/supergroups: -1000000000000 - channel_id
+//
+// gotd stores channel and chat peers by their bare MTProto ID, so configured
+// -100... supergroup IDs must be converted before looking them up in the peer
+// map built from MessagesGetDialogs.
+func normalizeChatID(botAPIID int64) (peerID int64, isChannel bool) {
+	if botAPIID >= 0 {
+		return botAPIID, false
+	}
+	if botAPIID <= -1000000000000 {
+		return -(botAPIID + 1000000000000), true
+	}
+	return -botAPIID, false
 }
 
 func topMessageDate(messages []tg.MessageClass, topMsgID int) (int, int) {

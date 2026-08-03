@@ -143,3 +143,22 @@ func TestServiceStopNoProcess(t *testing.T) {
 		t.Fatalf("Stop with no process should not error: %v", err)
 	}
 }
+
+func TestNormalizeChatID(t *testing.T) {
+	tests := []struct {
+		input    int64
+		wantID   int64
+		wantChan bool
+	}{
+		{12345, 12345, false},
+		{-12345, 12345, false},
+		{-1003548656968, 3548656968, true},
+		{-1001, 1001, false},
+	}
+	for _, tt := range tests {
+		gotID, gotChan := normalizeChatID(tt.input)
+		if gotID != tt.wantID || gotChan != tt.wantChan {
+			t.Errorf("normalizeChatID(%d) = (%d, %v), want (%d, %v)", tt.input, gotID, gotChan, tt.wantID, tt.wantChan)
+		}
+	}
+}
