@@ -611,7 +611,7 @@ func (s *Service) streamLoop(ctx context.Context) {
 			wg.Add(1)
 			go func(chatID int64) {
 				defer wg.Done()
-				s.streamChat(ctx, client.API(), joinAs, peers, chatID, streamURL)
+				s.streamChat(ctx, client.API(), dispatcher, joinAs, peers, chatID, streamURL)
 			}(id)
 		}
 		wg.Wait()
@@ -635,7 +635,7 @@ func (s *Service) streamLoop(ctx context.Context) {
 	}
 }
 
-func (s *Service) streamChat(ctx context.Context, api *tg.Client, joinAs *tg.InputPeerUser, peers map[int64]tg.InputPeerClass, chatID int64, streamURL string) {
+func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.UpdateDispatcher, joinAs *tg.InputPeerUser, peers map[int64]tg.InputPeerClass, chatID int64, streamURL string) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -655,6 +655,7 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, joinAs *tg.Inp
 		}
 
 		gc := calls.NewGroupCall(api, calls.Options{})
+		gc.Register(dispatcher)
 		gc.OnConnected(func() {
 			s.logger.Info("Joined voice chat", slog.Int64("chat", chatID))
 		})
@@ -670,6 +671,17 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, joinAs *tg.Inp
 			case <-time.After(5 * time.Second):
 				continue
 			}
+		}
+
+		// Explicitly unmute ourselves; some group calls may mute new joiners by
+		// default even if the join request doesn't ask for it.
+		editReq := &tg.PhoneEditGroupCallParticipantRequest{
+			Call:        call,
+			Participant: joinAs,
+		}
+		editReq.SetMuted(false)
+		if _, err := api.PhoneEditGroupCallParticipant(ctx, editReq); err != nil {
+			s.logger.Warn("Failed to unmute in voice chat", slog.Int64("chat", chatID), slog.String("error", err.Error()))
 		}
 
 		streamErr := streamAudio(ctx, s.logger.With(slog.Int64("chat", chatID)), gc.WriteAudio, streamURL)
