@@ -417,6 +417,14 @@ func (s *State) makeHLSSegments(source *netease.PlayableTrack, dir string) ([]*h
 	return segments, nil
 }
 
+// CurrentSourceURL returns the URL of the audio file currently being played,
+// or an empty string if playback is stopped.
+func (s *State) CurrentSourceURL() string {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return s.currentSourceURL
+}
+
 func (s *State) Snapshot() PublicState {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()

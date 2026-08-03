@@ -37,6 +37,7 @@ func NewServer(store storage.Storage, conf *config.Config, logger *slog.Logger) 
 	ns := netease.NewService(store, netEaseClient, logger.WithGroup("netease"))
 	state := playback.NewState(ns, ffmpegCLI, conf.TmpDir, logger.WithGroup("playback"))
 	ts := telegram.NewService(store, logger.WithGroup("telegram"))
+	ts.SetAudioSource(state)
 
 	return &Server{
 		playbackState:   state,

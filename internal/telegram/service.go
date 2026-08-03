@@ -36,6 +36,7 @@ type Service struct {
 
 	mutex        sync.RWMutex
 	config       Config
+	audioSource  AudioSource
 	streamCtx    context.Context
 	streamCancel context.CancelFunc
 	streamWg     sync.WaitGroup
@@ -49,16 +50,24 @@ func NewService(store Store, log *slog.Logger) *Service {
 	}
 }
 
-// localStreamURL returns the URL of the local Airstation HLS playlist. The
-// Telegram voice streamer always consumes this URL so it does not require
-// external network access. It respects the AIRSTATION_HTTP_PORT environment
-// variable, defaulting to 7331.
-func localStreamURL() string {
-	port := os.Getenv("AIRSTATION_HTTP_PORT")
-	if port == "" {
-		port = "7331"
+// SetAudioSource wires the voice streamer to the current playback source so
+// it streams the active track directly instead of relying on a generic HLS
+// playlist. This mirrors how music bots feed a single source to the call engine.
+func (s *Service) SetAudioSource(src AudioSource) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.audioSource = src
+}
+
+// currentSourceURL returns the URL of the audio currently being played by the
+// local Airstation playback state, or an empty string if playback is stopped.
+func (s *Service) currentSourceURL() string {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	if s.audioSource == nil {
+		return ""
 	}
-	return "http://localhost:" + port + "/stream"
+	return s.audioSource.CurrentSourceURL()
 }
 
 // Load reads Telegram voice stream configuration from persistent storage.
@@ -184,6 +193,8 @@ func (s *Service) EditConfig(newConfig Config) (PublicConfig, error) {
 	// Stream URL is ignored; the streamer always uses the local Airstation HLS
 	// playlist. Keep the field empty in storage for clarity.
 	newConfig.StreamURL = ""
+	// The streamer is always driven by the current Airstation playback source URL;
+	// any configured external stream URL is ignored.
 
 	if _, err := s.store.UpsertStationProperty(propEnabled, strconv.FormatBool(newConfig.Enabled)); err != nil {
 		return PublicConfig{}, err
@@ -570,9 +581,9 @@ func (s *Service) streamLoop(ctx context.Context) {
 	apiID := s.config.APIID.Int()
 	apiHash := s.config.APIHash
 	chatIDs := append([]string(nil), s.config.ChatIDs...)
-	// Always stream the local Airstation HLS playlist; ignore any configured
-	// external stream URL so no outbound network access is required.
-	streamURL := localStreamURL()
+	// Stream the current Airstation track directly. This matches how music
+	// bots feed a single source URL to the voice-call engine.
+	getSourceURL := func() string { return s.currentSourceURL() }
 	s.mutex.RUnlock()
 
 	sessionStore := &persistedSessionStorage{s: s}
@@ -611,7 +622,7 @@ func (s *Service) streamLoop(ctx context.Context) {
 			wg.Add(1)
 			go func(chatID int64) {
 				defer wg.Done()
-				s.streamChat(ctx, client.API(), dispatcher, joinAs, peers, chatID, streamURL)
+				s.streamChat(ctx, client.API(), dispatcher, joinAs, peers, chatID, getSourceURL)
 			}(id)
 		}
 		wg.Wait()
@@ -635,7 +646,7 @@ func (s *Service) streamLoop(ctx context.Context) {
 	}
 }
 
-func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.UpdateDispatcher, joinAs *tg.InputPeerUser, peers map[int64]tg.InputPeerClass, chatID int64, streamURL string) {
+func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.UpdateDispatcher, joinAs *tg.InputPeerUser, peers map[int64]tg.InputPeerClass, chatID int64, getSourceURL func() string) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -708,7 +719,7 @@ func (s *Service) streamChat(ctx context.Context, api *tg.Client, dispatcher tg.
 			s.logger.Warn("Failed to unmute in voice chat", slog.Int64("chat", chatID), slog.String("error", err.Error()))
 		}
 
-		streamErr := streamAudio(ctx, s.logger.With(slog.Int64("chat", chatID)), gc.WriteAudio, streamURL)
+		streamErr := streamAudio(ctx, s.logger.With(slog.Int64("chat", chatID)), gc.WriteAudio, getSourceURL)
 		if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
 			s.logger.Warn("Audio stream ended", slog.Int64("chat", chatID), slog.String("error", streamErr.Error()))
 		}
@@ -896,16 +907,52 @@ func topMessageDate(messages []tg.MessageClass, topMsgID int) (int, int) {
 	return 0, 0
 }
 
-// streamAudio transcodes the stream URL to Opus with ffmpeg and feeds it to write
-// as RTP packets, pacing in real time. It blocks until ctx is cancelled or the
-// source ends.
-func streamAudio(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) error, streamURL string) error {
-	// When AIRSTATION_TELEGRAM_TEST_TONE is set, stream a 1 kHz sine wave
-	// instead of the HLS playlist. This isolates connection/RTP issues from
-	// HLS/ffmpeg transcoding issues.
-	var cmd *exec.Cmd
+// streamAudio continuously transcodes the active Airstation audio source to Opus
+// and feeds it to write as RTP packets. When the playback source changes it
+// restarts ffmpeg with the new URL, keeping the call joined. This is the same
+// pattern used by music bots: feed the current source directly to the voice
+// engine instead of routing through an HLS playlist.
+func streamAudio(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) error, getURL func() string) error {
 	if os.Getenv("AIRSTATION_TELEGRAM_TEST_TONE") == "1" {
-		log.Info("using test tone instead of HLS playlist")
+		return streamAudioSource(ctx, log, write, "", nil, true)
+	}
+
+	for {
+		url := getURL()
+		if url == "" {
+			log.Debug("no audio source available, waiting")
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(1 * time.Second):
+				continue
+			}
+		}
+
+		log.Info("streaming audio source", slog.String("url", url))
+		err := streamAudioSource(ctx, log, write, url, getURL, false)
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, errSourceURLChanged) {
+			log.Warn("audio source ended", slog.String("error", err.Error()))
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
+		}
+	}
+}
+
+var errSourceURLChanged = errors.New("audio source URL changed")
+
+// streamAudioSource transcodes a single audio source to Opus and sends it as
+// RTP packets. When testTone is true it generates a 1 kHz sine wave instead.
+// If getURL is set and the URL changes, it returns errSourceURLChanged so the
+// caller can restart with the new source.
+func streamAudioSource(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) error, streamURL string, getURL func() string, testTone bool) error {
+	var cmd *exec.Cmd
+	if testTone {
+		log.Info("using test tone instead of audio source")
 		cmd = exec.CommandContext(ctx, "ffmpeg",
 			"-hide_banner", "-loglevel", "warning",
 			"-f", "lavfi",
@@ -920,9 +967,8 @@ func streamAudio(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) 
 		cmd = exec.CommandContext(ctx, "ffmpeg",
 			"-hide_banner", "-loglevel", "warning",
 			"-fflags", "+nobuffer",
-			"-user_agent", "Airstation/1.0 (ffmpeg)",
-			"-f", "hls",
-			"-live_start_index", "-3",
+			"-user_agent", "Mozilla/5.0 (compatible; Airstation/1.0)",
+			"-headers", "Referer: https://music.163.com\r\nCache-Control: no-cache\r\n",
 			"-i", streamURL,
 			"-vn",
 			"-ac", "2", "-ar", "48000",
@@ -959,11 +1005,6 @@ func streamAudio(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) 
 	}()
 
 	ogg := &oggDemuxer{r: bufio.NewReader(stdout)}
-	for range 2 {
-		if _, err := ogg.next(); err != nil {
-			return fmt.Errorf("read opus header: %w", err)
-		}
-	}
 
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
@@ -972,8 +1013,9 @@ func streamAudio(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) 
 	ts := rand.Uint32()          //nolint:gosec
 	opusSamples := uint32(48000 / 1000 * 20)
 	marker := true
+	framesSinceURLCheck := 0
 	for {
-		frame, err := ogg.next()
+		frame, err := ogg.nextAudioFrame()
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
@@ -985,6 +1027,17 @@ func streamAudio(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) 
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+		}
+
+		// Check for a new source URL every ~1 second so track transitions are
+		// picked up without leaving the voice call.
+		framesSinceURLCheck++
+		if getURL != nil && framesSinceURLCheck >= 50 {
+			framesSinceURLCheck = 0
+			if newURL := getURL(); newURL != streamURL {
+				log.Info("audio source changed, restarting ffmpeg", slog.String("old", streamURL), slog.String("new", newURL))
+				return errSourceURLChanged
+			}
 		}
 
 		seq++
@@ -1014,13 +1067,42 @@ func streamAudio(ctx context.Context, log *slog.Logger, write func(*rtp.Packet) 
 	}
 }
 
+const (
+	opusHeadMagic = "OpusHead"
+	opusTagsMagic = "OpusTags"
+)
+
+func isOpusHead(packet []byte) bool {
+	return len(packet) >= len(opusHeadMagic) && string(packet[:len(opusHeadMagic)]) == opusHeadMagic
+}
+
+func isOpusTags(packet []byte) bool {
+	return len(packet) >= len(opusTagsMagic) && string(packet[:len(opusTagsMagic)]) == opusTagsMagic
+}
+
 type oggDemuxer struct {
 	r     io.Reader
 	queue [][]byte
 	cur   []byte
 }
 
-func (d *oggDemuxer) next() ([]byte, error) {
+// nextAudioFrame returns the next Opus audio packet, skipping the OpusHead and
+// OpusTags header packets that can reappear whenever ffmpeg reinitializes the
+// Opus encoder (e.g., during HLS discontinuities or source changes).
+func (d *oggDemuxer) nextAudioFrame() ([]byte, error) {
+	for {
+		pkt, err := d.nextPacket()
+		if err != nil {
+			return nil, err
+		}
+		if isOpusHead(pkt) || isOpusTags(pkt) {
+			continue
+		}
+		return pkt, nil
+	}
+}
+
+func (d *oggDemuxer) nextPacket() ([]byte, error) {
 	for len(d.queue) == 0 {
 		if err := d.readPage(); err != nil {
 			return nil, err
