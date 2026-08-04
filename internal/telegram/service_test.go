@@ -169,9 +169,9 @@ func TestServiceStartRequiresInternalHLSURL(t *testing.T) {
 
 func TestServiceSetHLSURLTrimsWhitespace(t *testing.T) {
 	svc := NewService(&fakeStore{props: make(map[string]string)}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	svc.SetHLSURL("  http://127.0.0.1:7331/stream.m3u8  ")
+	svc.SetHLSURL("  http://127.0.0.1:7331/telegram-stream  ")
 
-	if svc.hlsURL != "http://127.0.0.1:7331/stream.m3u8" {
+	if svc.hlsURL != "http://127.0.0.1:7331/telegram-stream" {
 		t.Fatalf("hlsURL = %q", svc.hlsURL)
 	}
 }

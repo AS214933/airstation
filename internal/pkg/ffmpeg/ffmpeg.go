@@ -4,8 +4,10 @@ package ffmpeg
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -320,5 +322,33 @@ func (cli *CLI) generateSilence(duration float64, bitRate, sampleRate, channelCo
 		return fmt.Errorf("generating silence audio failed: %v\nOutput: %s", err, string(output))
 	}
 
+	return nil
+}
+
+// StreamHLSAsADTS remuxes the audio of an HLS playlist into a continuous ADTS
+// byte stream, writing it to w until the playlist is fully consumed or ctx is
+// cancelled. The streamer uses this instead of feeding an HLS URL to the
+// Telegram voice call: a playlist that grows or changes at track boundaries is
+// unreliable for ffmpeg's HLS demuxer, while a finished per-track playlist
+// remuxed to ADTS plays back seamlessly.
+func StreamHLSAsADTS(ctx context.Context, playlistPath string, w io.Writer) error {
+	cmd := exec.CommandContext(ctx, ffmpegBin,
+		"-hide_banner", "-loglevel", "error", "-nostdin",
+		"-i", playlistPath,
+		"-c", "copy",
+		"-f", "adts",
+		"pipe:1",
+	)
+	cmd.Stdout = w
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+
+	err := cmd.Run()
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("adts remux failed: %v\n%s", err, errBuf.String())
+	}
 	return nil
 }

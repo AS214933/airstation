@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -42,9 +43,14 @@ type State struct {
 	PlayNotify     chan string `json:"-"` // Channel to notify when playback starts
 	PauseNotify    chan bool   `json:"-"` // Channel to notify when playback is paused
 
-	PlaylistStr string        `json:"-"` // Current HLS playlist as a string
+	PlaylistStr string        `json:"-"` // Current (live) HLS playlist as a string
 	playlist    *hls.Playlist // Internal representation of the HLS playlist
 	playlistDir string        // Directory where HLS playlist segments are stored
+
+	// currentM3U8Path is the on-disk path of the currently playing track's
+	// HLS playlist. It is consumed by the Telegram voice streamer, which
+	// remuxes it into a continuous ADTS stream.
+	currentM3U8Path string
 
 	refreshCount    int64   // Number of state refresh cycles completed
 	refreshInterval float64 // Time interval (in seconds) between state updates
@@ -67,6 +73,7 @@ type preparedTrack struct {
 	songID   int64
 	url      string
 	segments []*hls.Segment
+	m3u8Path string // On-disk path of the track's HLS playlist
 }
 
 // NewState creates and initializes a new playback State instance.
@@ -181,6 +188,7 @@ func (s *State) Play() error {
 	s.CurrentTrackElapsed = 0
 	s.playlist = hls.NewPlaylist(current.segments, next.segments)
 	s.PlaylistStr = s.playlist.Generate(s.CurrentTrackElapsed)
+	s.currentM3U8Path = current.m3u8Path
 	s.UpdatedAt = time.Now().Unix()
 	s.IsPlaying = true
 	s.mutex.Unlock()
@@ -212,6 +220,7 @@ func (s *State) pauseLocked() {
 	s.CurrentTrackElapsed = 0
 	s.playlist = nil
 	s.PlaylistStr = ""
+	s.currentM3U8Path = ""
 	s.IsPlaying = false
 	s.UpdatedAt = time.Now().Unix()
 }
@@ -250,6 +259,7 @@ func (s *State) loadNextTrackLocked() (string, int64, error) {
 		nextSegments = s.nextPrepared.segments
 	}
 	s.playlist.Next(nextSegments)
+	s.currentM3U8Path = current.m3u8Path
 
 	return current.track.DisplayName(), current.songID, nil
 }
@@ -341,7 +351,7 @@ func (s *State) prepareRandomTrackAfter(recentlyPlayedSongIDs []int64, excludeSo
 		return nil, errors.New("netease playlist returned no playable track")
 	}
 
-	segments, err := s.makeHLSSegments(source, s.playlistDir)
+	segments, m3u8Path, err := s.makeHLSSegments(source, s.playlistDir)
 	if err != nil {
 		return nil, err
 	}
@@ -354,6 +364,7 @@ func (s *State) prepareRandomTrackAfter(recentlyPlayedSongIDs []int64, excludeSo
 		songID:   source.SongID,
 		url:      source.URL,
 		segments: segments,
+		m3u8Path: m3u8Path,
 	}, nil
 }
 
@@ -387,20 +398,21 @@ func (s *State) recordPlayedSong(songID int64) {
 	}
 }
 
-// makeHLSSegments generates HLS segments for a given track.
-func (s *State) makeHLSSegments(source *netease.PlayableTrack, dir string) ([]*hls.Segment, error) {
+// makeHLSSegments generates HLS segments for a given track and returns them
+// together with the on-disk path of the track's HLS playlist.
+func (s *State) makeHLSSegments(source *netease.PlayableTrack, dir string) ([]*hls.Segment, string, error) {
 	if source == nil || source.Track == nil {
-		return []*hls.Segment{}, nil
+		return []*hls.Segment{}, "", nil
 	}
 
 	if source.URL == "" {
-		return nil, fmt.Errorf("missing stream URL for track %s", source.Track.ID)
+		return nil, "", fmt.Errorf("missing stream URL for track %s", source.Track.ID)
 	}
 
 	segmentID := fmt.Sprintf("%s-%d-", source.Track.ID, time.Now().UnixNano())
 	err := s.ffmpegCLI.MakeRemoteHLSPlaylist(source.URL, dir, segmentID, hls.DefaultMaxSegmentDuration, source.Track.BitRate)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	segments := hls.GenerateSegments(
@@ -410,7 +422,7 @@ func (s *State) makeHLSSegments(source *netease.PlayableTrack, dir string) ([]*h
 		"/static/tmp",
 	)
 
-	return segments, nil
+	return segments, filepath.Join(dir, segmentID+".m3u8"), nil
 }
 
 func (s *State) Snapshot() PublicState {
@@ -434,6 +446,33 @@ func (s *State) Playlist() string {
 		return ""
 	}
 	return s.PlaylistStr
+}
+
+// CurrentHLSPlaylistPath returns the on-disk path of the currently playing
+// track's HLS playlist, or an empty string when playback is not active. It is
+// consumed by the Telegram voice streamer.
+func (s *State) CurrentHLSPlaylistPath() string {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if !s.IsPlaying {
+		return ""
+	}
+	return s.currentM3U8Path
+}
+
+// NextHLSPlaylistPath returns the on-disk path of the next prepared track's
+// HLS playlist, or an empty string when no next track is prepared yet. The
+// Telegram voice streamer uses it to chain tracks without waiting for the
+// playback state to switch at the track boundary.
+func (s *State) NextHLSPlaylistPath() string {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if !s.IsPlaying || s.nextPrepared == nil {
+		return ""
+	}
+	return s.nextPrepared.m3u8Path
 }
 
 func (s *State) Lyrics() (*netease.Lyrics, error) {

@@ -30,10 +30,10 @@ type Server struct {
 	router          *http.ServeMux
 }
 
-const telegramHLSPath = "/stream.m3u8"
+const telegramStreamPath = "/telegram-stream"
 
-func telegramHLSURL(port string) string {
-	return "http://127.0.0.1:" + port + telegramHLSPath
+func telegramStreamURL(port string) string {
+	return "http://127.0.0.1:" + port + telegramStreamPath
 }
 
 func NewServer(store storage.Storage, conf *config.Config, logger *slog.Logger) *Server {
@@ -43,7 +43,7 @@ func NewServer(store storage.Storage, conf *config.Config, logger *slog.Logger) 
 	ns := netease.NewService(store, netEaseClient, logger.WithGroup("netease"))
 	state := playback.NewState(ns, ffmpegCLI, conf.TmpDir, logger.WithGroup("playback"))
 	ts := telegram.NewService(store, logger.WithGroup("telegram"))
-	ts.SetHLSURL(telegramHLSURL(conf.HTTPPort))
+	ts.SetHLSURL(telegramStreamURL(conf.HTTPPort))
 
 	return &Server{
 		playbackState:   state,
@@ -62,7 +62,7 @@ func (s *Server) Run() {
 
 	// Public handlers
 	s.router.HandleFunc("GET /stream", s.handleHLSPlaylist)
-	s.router.HandleFunc("GET "+telegramHLSPath, s.handleHLSPlaylist)
+	s.router.HandleFunc("GET "+telegramStreamPath, s.handleTelegramStream)
 	s.router.HandleFunc("GET /api/v1/events", s.handleEvents)
 	s.router.HandleFunc("GET /api/v1/station/info", s.handleStationInfo)
 	s.router.HandleFunc("POST /api/v1/login", s.handleLogin)

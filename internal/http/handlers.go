@@ -1,14 +1,17 @@
 package http
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/cheatsnake/airstation/internal/netease"
+	"github.com/cheatsnake/airstation/internal/pkg/ffmpeg"
 	"github.com/cheatsnake/airstation/internal/pkg/sse"
 	"github.com/cheatsnake/airstation/internal/station"
 	"github.com/cheatsnake/airstation/internal/telegram"
@@ -28,6 +31,108 @@ func (s *Server) handleHLSPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Fprint(w, pl)
+}
+
+// handleTelegramStream serves one continuous ADTS audio stream consumed by the
+// Telegram voice streamer. Each track is remuxed from its finished on-disk HLS
+// playlist, so ffmpeg never has to follow a growing playlist: the streamer
+// chains the current track into the next prepared track with no gap at track
+// boundaries.
+func (s *Server) handleTelegramStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	out := &flushWriter{w: w, flusher: flusher}
+
+	ctx := r.Context()
+	lastPlayed := ""
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		path := s.nextTelegramSourcePath(lastPlayed)
+		if path == "" {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+
+		streamCtx, cancel := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() {
+			done <- ffmpeg.StreamHLSAsADTS(streamCtx, path, out)
+		}()
+
+		lastPlayed = path
+		s.logger.Info("streaming Telegram audio source", slog.String("path", path))
+
+	streaming:
+		for {
+			select {
+			case err := <-done:
+				cancel()
+				if err != nil && ctx.Err() == nil {
+					s.logger.Warn("Telegram ADTS remux failed", slog.String("error", err.Error()))
+					time.Sleep(500 * time.Millisecond)
+				}
+				break streaming
+			case <-time.After(200 * time.Millisecond):
+				// Stop early when the track is no longer part of the queue
+				// (pause or a track switch the web player already made).
+				if !s.telegramTrackStillActive(path) {
+					cancel()
+					<-done
+					break streaming
+				}
+			}
+		}
+	}
+}
+
+// telegramTrackStillActive reports whether path is still part of the stream
+// queue: it must be either the current track or the next prepared track. The
+// streamer keeps playing the current track even when the next one is not
+// prepared yet; it only stops early when the web player has already switched
+// past it or playback paused.
+func (s *Server) telegramTrackStillActive(path string) bool {
+	if s.playbackState.CurrentHLSPlaylistPath() == path {
+		return true
+	}
+	return s.playbackState.NextHLSPlaylistPath() == path
+}
+
+// nextTelegramSourcePath returns the next m3u8 path the Telegram streamer
+// should play after lastPlayed: the current track when it has not been played
+// yet, otherwise the next prepared track, so the stream chains tracks without
+// waiting for the playback state to switch.
+func (s *Server) nextTelegramSourcePath(lastPlayed string) string {
+	current := s.playbackState.CurrentHLSPlaylistPath()
+	if current != "" && current != lastPlayed {
+		return current
+	}
+	next := s.playbackState.NextHLSPlaylistPath()
+	if next != "" && next != lastPlayed {
+		return next
+	}
+	return ""
+}
+
+// flushWriter flushes the underlying ResponseWriter after every write so the
+// ADTS bytes reach the Telegram streamer's ffmpeg as soon as they are ready.
+type flushWriter struct {
+	w       io.Writer
+	flusher http.Flusher
+}
+
+func (fw *flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	if fw.flusher != nil {
+		fw.flusher.Flush()
+	}
+	return n, err
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {

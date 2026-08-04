@@ -602,6 +602,7 @@ func stateTrack(songID int64, name, artist, segmentPrefix string, duration float
 		songID:   songID,
 		url:      "https://example.test/" + strconv.FormatInt(songID, 10) + ".mp3",
 		segments: stateSegments(segmentPrefix, duration),
+		m3u8Path: "tmp/" + segmentPrefix + "all.m3u8",
 	}
 }
 
@@ -632,4 +633,74 @@ func recentNetEaseSongIDs(store *stateStationStore) []int64 {
 		}
 	}
 	return ids
+}
+
+func TestState_TelegramSourcePathsFollowPlayback(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := newStateStationStore()
+	client := &stateNetEaseClient{playlist: stateNetEasePlaylist()}
+	netEaseService := netease.NewService(store, client, log)
+	if err := netEaseService.Load(); err != nil {
+		t.Fatalf("load netease service: %v", err)
+	}
+
+	state := NewStateWithHLSMaker(netEaseService, &stateHLSMaker{}, t.TempDir(), log)
+	state.NewTrackNotify = make(chan string, 1)
+	state.PlayNotify = make(chan string, 1)
+	state.PauseNotify = make(chan bool, 1)
+	if err := state.Play(); err != nil {
+		t.Fatalf("start playback: %v", err)
+	}
+
+	current := state.CurrentHLSPlaylistPath()
+	next := state.NextHLSPlaylistPath()
+	if current == "" {
+		t.Fatal("current HLS playlist path is empty while playing")
+	}
+	if next == "" {
+		t.Fatal("next HLS playlist path is empty while playing")
+	}
+	if current == next {
+		t.Fatalf("current and next HLS playlist paths are identical: %q", current)
+	}
+
+	state.Pause()
+	if got := state.CurrentHLSPlaylistPath(); got != "" {
+		t.Fatalf("current HLS playlist path not cleared on pause: %q", got)
+	}
+	if got := state.NextHLSPlaylistPath(); got != "" {
+		t.Fatalf("next HLS playlist path not cleared on pause: %q", got)
+	}
+}
+
+func TestState_CurrentHLSPlaylistPathAdvancesAtBoundary(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := newStateStationStore()
+	client := &stateNetEaseClient{playlist: stateNetEasePlaylist()}
+	netEaseService := netease.NewService(store, client, log)
+	if err := netEaseService.Load(); err != nil {
+		t.Fatalf("load netease service: %v", err)
+	}
+
+	state := NewStateWithHLSMaker(netEaseService, &stateHLSMaker{}, t.TempDir(), log)
+	state.NewTrackNotify = make(chan string, 1)
+	state.PlayNotify = make(chan string, 1)
+	state.PauseNotify = make(chan bool, 1)
+	if err := state.Play(); err != nil {
+		t.Fatalf("start playback: %v", err)
+	}
+
+	nextBefore := state.NextHLSPlaylistPath()
+	if nextBefore == "" {
+		t.Fatal("next HLS playlist path is empty before the boundary")
+	}
+
+	state.mutex.Lock()
+	state.CurrentTrackElapsed = state.CurrentTrack.Duration - state.refreshInterval
+	state.mutex.Unlock()
+	state.refresh()
+
+	if got := state.CurrentHLSPlaylistPath(); got != nextBefore {
+		t.Fatalf("current HLS playlist path = %q after boundary, want the former next path %q", got, nextBefore)
+	}
 }
