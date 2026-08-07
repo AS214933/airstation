@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -86,6 +87,43 @@ func (r *telegramRing) append(p []byte) {
 func (r *telegramRing) Write(p []byte) (int, error) {
 	r.append(p)
 	return len(p), nil
+}
+
+// tryAppend adds p to the ring only if the whole slice fits, returning false
+// without blocking when the ring is full relative to the slowest reader. The
+// silence producer uses it so it can never be trapped waiting for a consumer
+// to drain: waiting would stop the producer from noticing a newly prepared
+// track. Dropping a silence chunk is harmless; dropping track audio is not.
+func (r *telegramRing) tryAppend(p []byte) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if int64(len(p)) > int64(r.capacity)-r.total+r.slowest {
+		return false
+	}
+	pos := int(r.total % int64(r.capacity))
+	first := min(len(p), r.capacity-pos)
+	copy(r.buf[pos:pos+first], p[:first])
+	if len(p) > first {
+		copy(r.buf[:len(p)-first], p[first:])
+	}
+	r.total += int64(len(p))
+	r.wakeLocked()
+	return true
+}
+
+// buffered returns how many unread bytes the ring holds relative to its
+// slowest reader.
+func (r *telegramRing) buffered() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.total - r.slowest
+}
+
+// readerCount reports how many readers are currently attached to the ring.
+func (r *telegramRing) readerCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.readers)
 }
 
 // subscribe registers a reader at the live edge and returns its id together
@@ -188,6 +226,10 @@ func (s *Server) runTelegramProducer(ctx context.Context) {
 		}
 		return false
 	}
+	// The previous iteration padded with silence. A silence-to-track handoff
+	// must bridge the remux startup with silence, because nothing else is
+	// buffered for the consumer at that moment (see remuxTrackToRing).
+	inSilence := false
 	for {
 		if ctx.Err() != nil {
 			return
@@ -207,30 +249,72 @@ func (s *Server) runTelegramProducer(ctx context.Context) {
 			path = next
 		}
 		if path == "" {
+			inSilence = true
 			if err := s.appendTelegramSilence(ctx); err != nil {
 				return
 			}
 			continue
 		}
+		bridge := inSilence
+		inSilence = false
 		played = append(played, path)
 		if len(played) > maxTelegramPlayedTracks {
 			played = append([]string(nil), played[len(played)-maxTelegramPlayedTracks:]...)
 		}
-		s.remuxTrackToRing(ctx, path)
+		s.remuxTrackToRing(ctx, path, bridge)
 	}
 }
 
 // remuxTrackToRing streams one track's ADTS into the shared ring until the
 // playlist is fully consumed, the context is cancelled, or the track leaves
 // the stream queue (pause or a track switch the web player already made).
-func (s *Server) remuxTrackToRing(ctx context.Context, path string) {
+// When bridge is set (the producer is coming from silence), the track's
+// ffmpeg spawn and probe take ~100-130 ms during which no audio bytes are
+// written. Padding with silence until the remux produces its first byte keeps
+// the ADTS stream continuous through the handoff, so the consumer's ffmpeg
+// never drains its buffer and stutters. Consecutive track handoffs need no
+// bridge: the ring's music backlog covers the next remux startup.
+func (s *Server) remuxTrackToRing(ctx context.Context, path string, bridge bool) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	first := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- ffmpeg.StreamHLSAsADTS(streamCtx, path, s.telegramRing)
+		w := io.Writer(s.telegramRing)
+		if bridge {
+			w = &firstByteWriter{w: s.telegramRing, first: first}
+		}
+		done <- ffmpeg.StreamHLSAsADTS(streamCtx, path, w)
 	}()
+
+	if bridge {
+		// Append one chunk immediately, then keep padding until the remux
+		// produces its first byte. The remux spawn + probe (~100-130 ms)
+		// would otherwise expose a gap to the consumer: the chunk appended
+		// here covers the full startup window.
+		s.appendSilenceChunk(ctx)
+		for {
+			select {
+			case <-first:
+			case err := <-done:
+				if err != nil && ctx.Err() == nil {
+					s.logger.Warn("Telegram ADTS remux failed", slog.String("path", path), slog.String("error", err.Error()))
+					time.Sleep(500 * time.Millisecond)
+				}
+				return
+			case <-time.After(silenceChunkDuration):
+				if !s.telegramTrackStillActive(path) {
+					cancel()
+					<-done
+					return
+				}
+				s.appendSilenceChunk(ctx)
+				continue
+			}
+			break
+		}
+	}
 
 	for {
 		select {
@@ -250,33 +334,53 @@ func (s *Server) remuxTrackToRing(ctx context.Context, path string) {
 	}
 }
 
+// firstByteWriter signals on the first write and then behaves exactly like
+// the wrapped writer. It lets the producer know when the remux has started
+// producing so the silence bridge can stop.
+type firstByteWriter struct {
+	w     io.Writer
+	first chan struct{}
+	once  sync.Once
+}
+
+func (f *firstByteWriter) Write(p []byte) (int, error) {
+	f.once.Do(func() { close(f.first) })
+	return f.w.Write(p)
+}
+
 // appendTelegramSilence appends one frame-aligned silence chunk to the ring.
-// The ring's backpressure paces the silence at real time, so at most
-// silenceChunkDuration of silence is queued when the next track becomes
-// available. The chunk is generated as whole ADTS frames, so repeating it
-// produces a valid continuous silence stream.
+// Each chunk spans silenceChunkDuration and the producer then sleeps the same
+// duration, pacing the silence at real time: the ring never holds more than a
+// chunk of silence, so the next track is never delayed by a silence backlog.
+// The chunk is generated as whole ADTS frames, so repeating it produces a
+// valid continuous silence stream.
 func (s *Server) appendTelegramSilence(ctx context.Context) error {
+	if err := s.appendSilenceChunk(ctx); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(silenceChunkDuration):
+	}
+	return nil
+}
+
+// appendSilenceChunk appends a single frame-aligned silence chunk without
+// pacing. It uses tryAppend so a stalled consumer can never trap the
+// producer: dropping a chunk is harmless and the producer stays free to
+// notice a newly prepared track.
+func (s *Server) appendSilenceChunk(ctx context.Context) error {
 	silence, err := s.telegramSilence()
 	if err != nil {
 		if !s.silenceWarned {
 			s.silenceWarned = true
 			s.logger.Warn("Telegram silence generation failed; stream may stall", slog.String("error", err.Error()))
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(200 * time.Millisecond):
-		}
 		return nil
 	}
-	s.telegramRing.append(silence)
-	// Pace silence at real time so a consumer that reads faster than real
-	// time never sees long gaps, and no more than one chunk of silence is
-	// queued when the next track becomes available.
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(silenceChunkDuration):
+	if s.telegramRing.readerCount() > 0 {
+		s.telegramRing.tryAppend(silence)
 	}
 	return nil
 }

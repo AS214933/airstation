@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,6 +104,31 @@ func (m *realHLSMaker) MakeRemoteHLSPlaylist(_ string, outDir, segName string, _
 	return nil
 }
 
+// notifyHLSMaker wraps realHLSMaker and closes done once the background
+// next-track preload (the third playlist generation, started by Play) has
+// finished writing, so the test can wait for it before t.TempDir cleanup
+// runs. Without the wait, cleanup races ffmpeg still writing segments and
+// fails with "directory not empty".
+type notifyHLSMaker struct {
+	realHLSMaker
+	mu    sync.Mutex
+	calls int
+	done  chan struct{}
+	once  sync.Once
+}
+
+func (m *notifyHLSMaker) MakeRemoteHLSPlaylist(a, outDir, segName string, d, e int) error {
+	err := m.realHLSMaker.MakeRemoteHLSPlaylist(a, outDir, segName, d, e)
+	m.mu.Lock()
+	m.calls++
+	ready := err == nil && m.calls >= 3
+	m.mu.Unlock()
+	if ready {
+		m.once.Do(func() { close(m.done) })
+	}
+	return err
+}
+
 func TestHandleTelegramStream(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := newTestStationStore()
@@ -111,7 +137,8 @@ func TestHandleTelegramStream(t *testing.T) {
 		t.Fatalf("load netease service: %v", err)
 	}
 
-	state := playback.NewStateWithHLSMaker(netEaseService, &realHLSMaker{}, t.TempDir(), log)
+	maker := &notifyHLSMaker{done: make(chan struct{})}
+	state := playback.NewStateWithHLSMaker(netEaseService, maker, t.TempDir(), log)
 	state.PlayNotify = make(chan string, 1)
 	state.NewTrackNotify = make(chan string, 1)
 	state.PauseNotify = make(chan bool, 1)
@@ -145,6 +172,10 @@ func TestHandleTelegramStream(t *testing.T) {
 			}
 			// ADTS frames are flowing; stop the stream and let the handler unwind.
 			cancel()
+			select {
+			case <-maker.done:
+			case <-time.After(10 * time.Second):
+			}
 			return
 		}
 		if readErr != nil {

@@ -115,6 +115,7 @@ func reportGaps(t *testing.T, frames []adtsFrame) {
 			maxGap = gap
 		}
 		if gap > 300*time.Millisecond {
+			t.Logf("gap@frame %d: %v (size %d -> %d)", i, gap.Round(time.Millisecond), frames[i-1].length, frames[i].length)
 			gapsOver += gap
 			gapCount++
 		}

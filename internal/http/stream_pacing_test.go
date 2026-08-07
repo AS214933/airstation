@@ -340,13 +340,13 @@ func TestTelegramStreamReconnectDoesNotReplay(t *testing.T) {
 
 	deadline := time.Now().Add(35 * time.Second)
 	for time.Now().Before(deadline) {
-		if state.CurrentTrack != nil && state.CurrentTrack.Name == "Four" {
+		if cur := state.Snapshot().CurrentTrack; cur != nil && cur.Name == "Four" {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	if state.CurrentTrack == nil || state.CurrentTrack.Name != "Four" {
-		t.Fatalf("playback never reached track 4 (current=%v)", state.CurrentTrack)
+	if cur := state.Snapshot().CurrentTrack; cur == nil || cur.Name != "Four" {
+		t.Fatalf("playback never reached track 4 (current=%v)", cur)
 	}
 	time.Sleep(1500 * time.Millisecond) // mid-track-4 on the web timeline
 
