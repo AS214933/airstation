@@ -5,6 +5,7 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/cheatsnake/airstation/internal/config"
@@ -28,6 +29,13 @@ type Server struct {
 	config          *config.Config
 	logger          *slog.Logger
 	router          *http.ServeMux
+
+	telegramRing     *telegramRing
+	telegramProducer sync.Once
+	silenceOnce      sync.Once
+	silenceBytes     []byte
+	silenceErr       error
+	silenceWarned    bool
 }
 
 const telegramStreamPath = "/telegram-stream"

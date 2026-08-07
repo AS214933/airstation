@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/cheatsnake/airstation/internal/pkg/fs"
 	"github.com/cheatsnake/airstation/internal/pkg/hls"
@@ -322,6 +323,32 @@ func (cli *CLI) generateSilence(duration float64, bitRate, sampleRate, channelCo
 		return fmt.Errorf("generating silence audio failed: %v\nOutput: %s", err, string(output))
 	}
 
+	return nil
+}
+
+// GenerateSilenceADTS writes duration seconds of AAC-LC silence (48 kHz
+// stereo, ADTS framing) to w. The Telegram stream producer uses it to keep the
+// consumer's ffmpeg input flowing while no track is ready, so the consumer
+// never times out and reconnects to the stream from the beginning.
+func GenerateSilenceADTS(ctx context.Context, w io.Writer, duration time.Duration) error {
+	cmd := exec.CommandContext(ctx, ffmpegBin,
+		"-hide_banner", "-loglevel", "error", "-nostdin",
+		"-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+		"-t", strconv.FormatFloat(duration.Seconds(), 'f', 3, 64),
+		"-c:a", "aac", "-b:a", "128k",
+		"-f", "adts", "-",
+	)
+	cmd.Stdout = w
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+
+	err := cmd.Run()
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("silence generation failed: %v\n%s", err, errBuf.String())
+	}
 	return nil
 }
 
