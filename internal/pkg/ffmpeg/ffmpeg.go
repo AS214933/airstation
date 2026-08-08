@@ -352,17 +352,34 @@ func GenerateSilenceADTS(ctx context.Context, w io.Writer, duration time.Duratio
 	return nil
 }
 
-// StreamHLSAsADTS remuxes the audio of an HLS playlist into a continuous ADTS
-// byte stream, writing it to w until the playlist is fully consumed or ctx is
-// cancelled. The streamer uses this instead of feeding an HLS URL to the
-// Telegram voice call: a playlist that grows or changes at track boundaries is
-// unreliable for ffmpeg's HLS demuxer, while a finished per-track playlist
-// remuxed to ADTS plays back seamlessly.
+// telegramStreamSampleRate, telegramStreamChannels, and telegramStreamBitrate
+// define the canonical encoding of the shared Telegram ADTS stream. Tracks are
+// re-encoded (not stream-copied) so the ADTS sample rate and channel layout
+// never change mid-stream: the consumer's ffmpeg re-initialises its decoder
+// and resampler on a rate change, which stalls page output for ~120-170 ms —
+// an audible stutter at the start of the next track whenever a 44.1 kHz and a
+// 48 kHz song meet in the playlist.
+const (
+	telegramStreamSampleRate = 48000
+	telegramStreamChannels   = 2
+	telegramStreamBitrate    = 192 // kbps
+)
+
+// StreamHLSAsADTS converts the audio of an HLS playlist into the canonical
+// continuous ADTS byte stream, writing it to w until the playlist is fully
+// consumed or ctx is cancelled. The streamer uses this instead of feeding an
+// HLS URL to the Telegram voice call: a playlist that grows or changes at
+// track boundaries is unreliable for ffmpeg's HLS demuxer, while a finished
+// per-track playlist remuxed to ADTS plays back seamlessly.
 func StreamHLSAsADTS(ctx context.Context, playlistPath string, w io.Writer) error {
 	cmd := exec.CommandContext(ctx, ffmpegBin,
 		"-hide_banner", "-loglevel", "error", "-nostdin",
 		"-i", playlistPath,
-		"-c", "copy",
+		"-vn", "-sn", "-dn",
+		"-c:a", "aac",
+		"-ar", strconv.Itoa(telegramStreamSampleRate),
+		"-ac", strconv.Itoa(telegramStreamChannels),
+		"-b:a", strconv.Itoa(telegramStreamBitrate)+"k",
 		"-f", "adts",
 		"pipe:1",
 	)

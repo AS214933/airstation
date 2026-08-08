@@ -9,8 +9,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/cheatsnake/airstation/internal/pkg/hls"
 )
 
 // modelsOpusFrameMs is the duration of one Opus frame the gotgcall consumer
@@ -112,6 +115,82 @@ func TestTelegramStreamMultiSegmentNoContentGaps(t *testing.T) {
 	t.Logf("adts=%d bytes, decoded silence gaps >50ms: %d", len(raw), gaps)
 	if gaps > 0 {
 		t.Errorf("content-level gaps in decoded telegram ADTS: %d", gaps)
+	}
+}
+
+// mixedRateHLSMaker generates short dense stereo tracks alternating 44100 and
+// 48000 Hz at high bitrate, so consecutive tracks meet at different sample
+// rates in the continuous ADTS stream — the condition that used to stall the
+// Telegram consumer's ffmpeg for ~150 ms at every track boundary.
+type mixedRateHLSMaker struct {
+	duration int
+	mu       sync.Mutex
+	calls    int
+}
+
+func (m *mixedRateHLSMaker) MakeRemoteHLSPlaylist(_ string, outDir, segName string, _ int, _ int) error {
+	m.mu.Lock()
+	m.calls++
+	n := m.calls
+	m.mu.Unlock()
+	// Start at 48 kHz: the consumer's ffmpeg initialises without a resampler
+	// for 48 kHz input, so the first 44.1 kHz track makes it insert one
+	// mid-stream, stalling output for ~140 ms at that track's start.
+	sr := 48000
+	if n%2 == 0 {
+		sr = 44100
+	}
+	cmd := exec.Command("ffmpeg",
+		"-y", "-f", "lavfi",
+		"-i", fmt.Sprintf("anoisesrc=color=white:amplitude=0.3:sample_rate=%d:duration=%d", sr, m.duration),
+		"-af", "volume=6dB,lowpass=f=7000",
+		"-ac", "2",
+		"-c:a", "aac", "-b:a", "320k",
+		"-start_number", "0", "-hls_time", "4",
+		"-hls_playlist_type", "event",
+		"-hls_segment_type", "fmp4",
+		"-hls_fmp4_init_filename", segName+"init"+hls.InitSegmentExtension,
+		"-hls_segment_filename", filepath.Join(outDir, segName+"%d"+hls.SegmentExtension),
+		filepath.Join(outDir, segName+".m3u8"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mixed-rate hls generation failed: %v\n%s", err, out)
+	}
+	return nil
+}
+
+// TestTelegramStreamMixedRateNoPause plays alternating 44.1 kHz / 48 kHz
+// tracks through the real consumer and asserts the audio never pauses at a
+// track boundary. The ADTS stream used to be stream-copied at the source
+// rate, so a rate change mid-stream made the consumer's ffmpeg re-initialise
+// its decoder/resampler and stop producing pages for ~150 ms — an audible
+// stutter at the start of the next track. The producer now re-encodes every
+// track to a fixed 48 kHz stereo stream, so boundaries are clean.
+func TestTelegramStreamMixedRateNoPause(t *testing.T) {
+	ts, _ := runPacingServer(t, &mixedRateHLSMaker{duration: 8}, &durationNetEaseClient{duration: 8})
+	rec := &sampleRecorder{}
+	st, stop := startConsumer(t, ts.URL+telegramStreamPath, rec)
+	defer stop()
+	select {
+	case <-st.Done():
+	case <-time.After(55 * time.Second):
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+
+	gaps := 0
+	for i := 1; i < len(rec.samples); i++ {
+		if rec.samples[i-1].size > 8 && rec.samples[i].size > 8 {
+			if gap := rec.samples[i].at.Sub(rec.samples[i-1].at); gap > 100*time.Millisecond {
+				t.Errorf("audio pause of %v at t=%.1fs", gap, rec.samples[i].at.Sub(rec.samples[0].at).Seconds())
+				gaps++
+			}
+		}
+	}
+	t.Logf("samples=%d audio pauses >100ms=%d", len(rec.samples), gaps)
+	if len(rec.samples) < 2000 {
+		t.Errorf("too few samples received: %d", len(rec.samples))
 	}
 }
 

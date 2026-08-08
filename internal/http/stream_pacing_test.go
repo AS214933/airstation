@@ -187,7 +187,7 @@ func (r *sampleRecorder) report(t *testing.T) {
 		len(r.samples), audioMs, time.Since(r.samples[0].at), maxGap, stallCount, totalStall)
 }
 
-func runPacingServer(t *testing.T, maker *e2eHLSMaker, client netease.Client) (*httptest.Server, *playback.State) {
+func runPacingServer(t *testing.T, maker playback.HLSMaker, client netease.Client) (*httptest.Server, *playback.State) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := newTestStationStore()
