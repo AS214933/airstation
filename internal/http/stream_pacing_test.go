@@ -59,9 +59,10 @@ func (c *eightSecondNetEaseClient) Account(_ string) (*netease.Account, error) {
 // slow deterministically, regardless of which tracks the random picker
 // chooses.
 type e2eHLSMaker struct {
-	duration int
-	slowFrom int
-	slowFor  time.Duration
+	duration    int
+	segDuration int // per-segment seconds; defaults to duration (single segment)
+	slowFrom    int
+	slowFor     time.Duration
 
 	mu    sync.Mutex
 	calls int
@@ -76,6 +77,10 @@ func (m *e2eHLSMaker) MakeRemoteHLSPlaylist(_ string, outDir, segName string, _ 
 		time.Sleep(m.slowFor)
 	}
 	dur := fmt.Sprintf("%d", m.duration)
+	hlsTime := dur
+	if m.segDuration > 0 {
+		hlsTime = fmt.Sprintf("%d", m.segDuration)
+	}
 	// Derive a distinct sine frequency per track so tests can tell which
 	// track a consumer is hearing from the encoded bytes alone.
 	freq := "440"
@@ -88,7 +93,7 @@ func (m *e2eHLSMaker) MakeRemoteHLSPlaylist(_ string, outDir, segName string, _ 
 	cmd := exec.Command("ffmpeg",
 		"-y", "-f", "lavfi", "-i", "sine=frequency="+freq+":sample_rate=48000:duration="+dur,
 		"-vn", "-c:a", "aac", "-b:a", "128k",
-		"-start_number", "0", "-hls_time", dur,
+		"-start_number", "0", "-hls_time", hlsTime,
 		"-hls_playlist_type", "event",
 		"-hls_segment_type", "fmp4",
 		"-hls_fmp4_init_filename", segName+"init"+hls.InitSegmentExtension,
@@ -282,6 +287,24 @@ func (c *sixTrackNetEaseClient) SongURL(songID int64, _ netease.Quality, _ strin
 func (c *sixTrackNetEaseClient) Lyrics(_ int64, _ string) (*netease.Lyrics, error) { return nil, nil }
 func (c *sixTrackNetEaseClient) Account(_ string) (*netease.Account, error) {
 	return &netease.Account{Nickname: "test"}, nil
+}
+
+// durationNetEaseClient wraps sixTrackNetEaseClient so tests can declare track
+// durations that match the audio their HLS maker generates.
+type durationNetEaseClient struct {
+	sixTrackNetEaseClient
+	duration int
+}
+
+func (c *durationNetEaseClient) Playlist(a, b string) (*netease.Playlist, error) {
+	pl, err := c.sixTrackNetEaseClient.Playlist(a, b)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range pl.Tracks {
+		s.Duration = float64(c.duration)
+	}
+	return pl, nil
 }
 
 // TestTelegramStreamSlowPreloadStaysContinuous reproduces the reported

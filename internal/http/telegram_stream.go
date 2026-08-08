@@ -281,9 +281,9 @@ func (s *Server) remuxTrackToRing(ctx context.Context, path string, bridge bool)
 	first := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		w := io.Writer(s.telegramRing)
+		w := io.Writer(&pacedWriter{w: s.telegramRing, maxRate: telegramProducerRate})
 		if bridge {
-			w = &firstByteWriter{w: s.telegramRing, first: first}
+			w = &firstByteWriter{w: w, first: first}
 		}
 		done <- ffmpeg.StreamHLSAsADTS(streamCtx, path, w)
 	}()
